@@ -13,5 +13,9 @@ repo_gpgcheck=1
 gpgkey=https://yum.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
 EOF
 ```
+Instalar la libreria MKL.
+```
+sudo dnf install intel-oneapi-mkl-devel
+```
 
 
