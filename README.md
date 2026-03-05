@@ -2,6 +2,7 @@
 
 ## Instalación MKL 
 
+Agregar repositorio de Intel
 ```
 sudo tee /etc/yum.repos.d/oneAPI.repo > /dev/null << \EOF
 [oneAPI]
