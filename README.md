@@ -17,6 +17,11 @@ EOF
 Instalar la libreria MKL.
 ```
 sudo dnf install intel-oneapi-mkl-devel
+
+## Comando para la generación del gemm.
 ```
+g++ src/gemm_l_mkl.cpp     -I/home/jsgalvisb/proyecto/src/papi/src     -L/home/jsgalvisb/proyecto/src/papi/src     -Wl,-rpath,/home/jsgalvisb/proyecto/src/papi/src     -lpapi -lmkl_rt -o gemm_exe
+```
+
 
 
