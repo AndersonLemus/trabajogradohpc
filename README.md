@@ -23,5 +23,10 @@ sudo dnf install intel-oneapi-mkl-devel
 g++ src/gemm_l_mkl.cpp     -I/home/jsgalvisb/proyecto/src/papi/src     -L/home/jsgalvisb/proyecto/src/papi/src     -Wl,-rpath,/home/jsgalvisb/proyecto/src/papi/src     -lpapi -lmkl_rt -o gemm_exe
 ```
 
+## Comando para manipulación y uso de ILP
+```
+pip install cplex
+python ILP.py --input dataset.csv --exact --solver CPLEX
+```
 
 
