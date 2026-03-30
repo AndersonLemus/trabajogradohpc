@@ -36,7 +36,7 @@ g++ src/gemm_l_mkl.cpp     -I/home/jsgalvisb/proyecto/src/papi/src     -L/home/j
 
 Para ejecutar cualquier archivo relacionado con cuda, es menester ejecutar el siguiente comando sin que el setup_env.sh haya sido ejecutado previamente
 ```
-setup_env_cuda.sh
+source ./setup_env_cuda.sh
 ```
 
 ## Comando usado para la generación de los kernels en CUDA.
