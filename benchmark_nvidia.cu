@@ -1,12 +1,4 @@
 /*
- * benchmark_nvidia.cu
- * ============================================================
- * Benchmark HPC para plataformas NVIDIA del clúster SC3 — UIS
- *
- *   HPE ProLiant XL290n G10+  →  NVIDIA A100 40 GB   (sm_80)
- *   HPE ProLiant DL580 G7     →  NVIDIA GTX Titan X  (sm_52)
- *
- * Kernels:
  *   GEMM  — cuBLAS   (cublasDgemm, double precision)
  *   SpMV  — cuSPARSE (cusparseSpMV, CSR, double)
  *   FFT   — cuFFT    (cufftExecD2Z, 1D real→complex)
@@ -38,7 +30,6 @@
  *   gpu_time_ms, gpu_energy_j, gflops, bw_gbps,
  *   cpu_flops, cpu_l1_miss, cpu_l2_miss, cpu_l3_miss,
  *   cpu_cycles, cpu_instructions
- * ============================================================
  */
 
 #include <stdio.h>
