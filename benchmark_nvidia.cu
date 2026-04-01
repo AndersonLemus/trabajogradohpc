@@ -45,7 +45,7 @@
 #include <nvml.h>
 #include <papi.h>
 
-/* ───────────────────────────── Macros de error ───────────────────────────── */
+/* Macros de error */
 
 #define CUDA_CHECK(x) do {                                              \
     cudaError_t _e = (x);                                              \
@@ -99,7 +99,7 @@
                 __FILE__, __LINE__, PAPI_strerror(_r));                 \
 } while(0)
 
-/* ──────────────────────────── Configuración ──────────────────────────────── */
+/* Configuración */
 
 #define WARMUP_RUNS      3
 #define BENCH_RUNS       5
@@ -131,7 +131,7 @@ static const int FFT_N[] = {
 };
 static const int N_FFT = (int)(sizeof(FFT_N)/sizeof(FFT_N[0]));
 
-/* ─────────────────────────── Estructura de resultado ─────────────────────── */
+/* Estructura de resultado */
 
 typedef struct {
     char   kernel[16];
@@ -150,7 +150,7 @@ typedef struct {
     long long cpu_instr;
 } Result;
 
-/* ────────────────────────── NVML: hilo de muestreo ──────────────────────── */
+/* NVML: hilo de muestreo */
 
 typedef struct {
     nvmlDevice_t dev;
@@ -171,7 +171,7 @@ static void* nvml_thread(void* arg)
     return NULL;
 }
 
-/* ──────────────────────────────── PAPI ───────────────────────────────────── */
+/* PAPI */
 
 #define N_EV 6
 static int papi_evset = PAPI_NULL;
@@ -193,7 +193,7 @@ static void papi_setup(void)
     }
 }
 
-/* ─────────────────────────── Escritura CSV ───────────────────────────────── */
+/* Escritura CSV */
 
 static void csv_header(FILE* f)
 {
@@ -216,9 +216,8 @@ static void csv_row(FILE* f, const char* plat, const Result* r)
         r->cpu_l3_miss, r->cpu_cycles, r->cpu_instr);
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * GEMM — cuBLAS dgemm
- * ════════════════════════════════════════════════════════════════════════════
+/* 
+ * GEMM - cuBLAS dgemm
  * C = alpha*A*B + beta*C   (todas N×N, double)
  * FLOPs = 2*N^3
  * Bytes  = 3*N^2*8  (lectura A,B + escritura C)
@@ -297,9 +296,8 @@ static Result run_gemm(int N, cublasHandle_t blas, nvmlDevice_t nvml)
     return r;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * SpMV — cuSPARSE CSR
- * ════════════════════════════════════════════════════════════════════════════
+/*
+ * SpMV - cuSPARSE CSR
  * y = A * x   (A N×N sparse CSR, double)
  * FLOPs = 2 * nnz
  * Bytes  = nnz*8 (val) + nnz*4 (col) + (N+1)*4 (row) + N*8 (x) + N*8 (y)
@@ -427,9 +425,8 @@ static Result run_spmv(int N, double sparsity,
     return r;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * FFT — cuFFT D2Z (real double → complex double, 1D)
- * ════════════════════════════════════════════════════════════════════════════
+/* 
+ * FFT - cuFFT D2Z (real double a complex double, 1D)
  * FLOPs ≈ 5 * N * log2(N)
  * Bytes  = N*8 (entrada) + (N/2+1)*16 (salida)
  */
@@ -504,10 +501,6 @@ static Result run_fft(int N, nvmlDevice_t nvml)
     return r;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * main
- * ════════════════════════════════════════════════════════════════════════════ */
-
 int main(int argc, char* argv[])
 {
     const char* out_path = "resultados_nvidia.csv";
@@ -547,7 +540,7 @@ int main(int argc, char* argv[])
     csv_header(fp);
     printf("Resultados → %s\n\n", out_path);
 
-    /* ════ GEMM ═════════════════════════════════════════════════════════════ */
+    /* GEMM */
     printf("=== GEMM (cuBLAS dgemm) ===\n");
     printf("%-6s  %-12s  %-12s  %-10s  %-10s\n",
            "N", "T_gpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
@@ -563,7 +556,7 @@ int main(int argc, char* argv[])
         csv_row(fp, platform, &r); fflush(fp);
     }
 
-    /* ════ SpMV ═════════════════════════════════════════════════════════════ */
+    /* SpMV */
     printf("\n=== SpMV (cuSPARSE CSR) ===\n");
     printf("%-6s  %-8s  %-10s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_gpu(ms)", "Energy(J)", "GFLOPS");
@@ -586,7 +579,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    /* ════ FFT ══════════════════════════════════════════════════════════════ */
+    /* FFT */
     printf("\n=== FFT (cuFFT D2Z) ===\n");
     printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
            "N", "T_gpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
