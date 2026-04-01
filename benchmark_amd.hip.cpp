@@ -1,11 +1,4 @@
 /*
- * benchmark_amd.hip.cpp
- * ============================================================
- * Benchmark HPC para plataforma AMD del clúster SC3 — UIS
- *
- *   Dell PowerEdge R7625  →  AMD Instinct MI210 64 GB  (gfx90a)
- *
- * Kernels:
  *   GEMM  — rocBLAS   (rocblas_dgemm, double precision)
  *   SpMV  — rocSPARSE (rocsparse_dcsrmv, CSR, double)
  *   FFT   — rocFFT    (rocfft_execute, D2Z, 1D)
@@ -36,7 +29,6 @@
  *   gpu_time_ms, gpu_energy_j, gflops, bw_gbps,
  *   cpu_fp_ops, cpu_l1_miss, cpu_l2_miss, cpu_l3_miss,
  *   cpu_cycles, cpu_instructions
- * ============================================================
  */
 
 #include <stdio.h>
@@ -61,12 +53,12 @@
 /* PAPI */
 #include <papi.h>
 
-/* ─────────────────────────── Medición de potencia AMD ───────────────────────
+/* Medición de potencia AMD
  * Dos estrategias:
- *   1. amdsmi (ROCm ≥ 6.0)  — más precisa
- *   2. sysfs hwmon           — compatible con versiones anteriores
+ *   1. amdsmi (ROCm ≥ 6.0) - más precisa
+ *   2. sysfs hwmon - compatible con versiones anteriores
  * Se selecciona con -DUSE_SYSFS_POWER o sin ella (amdsmi).
- * ─────────────────────────────────────────────────────────────────────────── */
+ */
 
 #ifndef USE_SYSFS_POWER
   /* amdsmi — disponible en ROCm ≥ 6.0 */
@@ -76,7 +68,7 @@
   #define POWER_BACKEND "sysfs"
 #endif
 
-/* ──────────────────────────────── Macros error ──────────────────────────── */
+/*  Macros error */
 
 #define HIP_CHECK(x) do {                                               \
     hipError_t _e = (x);                                               \
@@ -121,7 +113,7 @@
                 __FILE__, __LINE__, PAPI_strerror(_r));                 \
 } while(0)
 
-/* ──────────────────────────── Configuración ─────────────────────────────── */
+/* Configuración */
 
 #define WARMUP_RUNS      3
 #define BENCH_RUNS       5
@@ -149,7 +141,7 @@ static const int FFT_N[] = {
 };
 static const int N_FFT = (int)(sizeof(FFT_N)/sizeof(FFT_N[0]));
 
-/* ─────────────────────────── Estructura de resultado ────────────────────── */
+/* Estructura de resultado */
 
 typedef struct {
     char   kernel[16];
@@ -168,9 +160,7 @@ typedef struct {
     long long cpu_instr;
 } Result;
 
-/* ──────────────────────── Medición de potencia AMD ─────────────────────────
- * Contexto del hilo de muestreo. Funciona con amdsmi o sysfs.
- * ─────────────────────────────────────────────────────────────────────────── */
+/* Medición de potencia AMD */
 
 typedef struct {
     volatile int active;
@@ -184,10 +174,7 @@ typedef struct {
 } PowerCtx;
 
 #ifdef USE_SYSFS_POWER
-/*
- * Localiza el archivo de potencia del primer dispositivo amdgpu en sysfs.
- * Ruta típica: /sys/class/hwmon/hwmon<n>/power1_average  (valor en µW)
- */
+/* Localiza el archivo de potencia del primer dispositivo amdgpu en sysfs */
 static int find_amdgpu_hwmon(char* path, size_t len)
 {
     for (int idx = 0; idx < 20; idx++) {
@@ -265,7 +252,7 @@ static void power_ctx_init(PowerCtx* ctx)
 #endif
 }
 
-/* ──────────────────────────────── PAPI ──────────────────────────────────── */
+/* PAPI */
 
 #define N_EV 6
 static int papi_evset = PAPI_NULL;
@@ -287,7 +274,7 @@ static void papi_setup(void)
     }
 }
 
-/* ─────────────────────────── Escritura CSV ──────────────────────────────── */
+/* Escritura CSV */
 
 static void csv_header(FILE* f)
 {
@@ -318,9 +305,8 @@ static double hip_elapsed_ms(hipEvent_t start, hipEvent_t stop)
     return (double)ms;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * GEMM — rocBLAS dgemm
- * ════════════════════════════════════════════════════════════════════════════
+/*
+ * GEMM - rocBLAS dgemm
  * C = alpha*A*B + beta*C  (N×N, double)
  * FLOPs = 2*N^3
  * Bytes  = 3*N^2*8
@@ -400,9 +386,8 @@ static Result run_gemm(int N, rocblas_handle blas, PowerCtx* pctx)
     return r;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
+/*
  * SpMV — rocSPARSE CSR (dcsrmv)
- * ════════════════════════════════════════════════════════════════════════════
  * y = alpha * A * x + beta * y  (CSR, double)
  * FLOPs = 2 * nnz
  */
@@ -518,9 +503,8 @@ static Result run_spmv(int N, double sparsity,
     return r;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
+/*
  * FFT — rocFFT 1D real-to-complex (D2Z equivalente)
- * ════════════════════════════════════════════════════════════════════════════
  * FLOPs ≈ 5 * N * log2(N)
  * Bytes  = N*8 + (N/2+1)*16
  *
@@ -623,10 +607,6 @@ static Result run_fft(int N, PowerCtx* pctx)
     return r;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * main
- * ════════════════════════════════════════════════════════════════════════════ */
-
 int main(int argc, char* argv[])
 {
     const char* out_path = "resultados_mi210.csv";
@@ -664,7 +644,7 @@ int main(int argc, char* argv[])
 
     const char* platform = "Dell_R7625_MI210";
 
-    /* ════ GEMM ══════════════════════════════════════════════════════════════ */
+    /* GEMM */
     printf("=== GEMM (rocBLAS dgemm) ===\n");
     printf("%-6s  %-12s  %-12s  %-10s  %-10s\n",
            "N", "T_gpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
@@ -680,7 +660,7 @@ int main(int argc, char* argv[])
         csv_row(fp, platform, &r); fflush(fp);
     }
 
-    /* ════ SpMV ══════════════════════════════════════════════════════════════ */
+    /* SpMV */
     printf("\n=== SpMV (rocSPARSE dcsrmv) ===\n");
     printf("%-6s  %-8s  %-10s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_gpu(ms)", "Energy(J)", "GFLOPS");
@@ -702,7 +682,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    /* ════ FFT ═══════════════════════════════════════════════════════════════ */
+    /* FFT */
     printf("\n=== FFT (rocFFT D2Z) ===\n");
     printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
            "N", "T_gpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
