@@ -46,6 +46,15 @@ nvcc -O3 -arch=sm_52 -allow-unsupported-compiler src/benchmark_nvidia.cu      -I
 
 
 
+## Compilación para Intel CPU
+```
+g++ -O3 -march=native -std=c++17 src/hpc_dataset.cpp \
+    -I${MKLROOT}/include \
+    -L${MKLROOT}/lib/intel64 \
+    -lmkl_intel_lp64 -lmkl_sequential -lmkl_core \
+    -lpthread -lm -ldl -o bin/hpc_dataset
+```
+
 ## Comando para manipulación y uso de ILP
 ```
 pip install cplex
