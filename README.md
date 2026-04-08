@@ -46,7 +46,7 @@ g++ -O3 -march=znver4 -fopenmp -std=c++17 benchmark_cpu_amd.cpp \
         -o benchmark_epyc
 
 module load cuda
-nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -lcublas -lcusparse -lcufft -lnvml -lpthread -o benchmark_titanx
+nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvidia-ml -lcublas -lcusparse -lcufft -lpthread -o benchmark_titanx
 ```
 
 ## Comando para manipulación y uso de ILP
