@@ -77,7 +77,7 @@ static const int SPMV_N[] = {
 static const int N_SPMV = (int)(sizeof(SPMV_N) / sizeof(SPMV_N[0]));
 
 static const double SPARSITIES[] = { 0.01, 0.001, 0.0001, 0.00001 };
-static const int    N_SP         = 1;
+static const int    N_SP         = 4;
 
 static const int FFT_N[] = {
     256, 375, 512, 750, 1024, 1500, 2048, 3000, 4096, 6000,
