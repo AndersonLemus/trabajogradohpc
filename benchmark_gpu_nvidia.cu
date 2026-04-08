@@ -398,7 +398,8 @@ static Result run_fft(int N, nvmlDevice_t nvml)
         tot_ms += ms;
     }
 
-    r.gpu_energy_j = nvml_stop(&ctx, tid);
+    double total_energy = nvml_stop(&ctx, tid);
+    r.gpu_energy_j = (total_energy / BENCH_RUNS);
     r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
