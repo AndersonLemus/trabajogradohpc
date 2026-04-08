@@ -44,7 +44,11 @@ source ./setup_env_cuda.sh
 nvcc -O3 -arch=sm_52 -allow-unsupported-compiler src/benchmark_nvidia.cu      -I/home/jsgalvisb/proyecto/src/papi/src      -L/home/jsgalvisb/proyecto/src/papi/src      -Xlinker -rpath,/home/jsgalvisb/proyecto/src/papi/src      -lcublas -lcusparse -lcufft -lnvml -lpapi -lpthread      -o bin/benchmark_titanx
 ```
 
-
+## SRUN
+```
+CPU: srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
+GPU: srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --gres=gpu:1 --time=02:00:00 --pty bash -i
+```
 
 ## Compilación para Intel CPU
 ```
