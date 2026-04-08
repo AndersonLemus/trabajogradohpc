@@ -41,7 +41,8 @@ source ./setup_env_cuda.sh
 
 ## Comando usado para la generación de los kernels en CUDA.
 ```
-nvcc -O3 -arch=sm_52 -allow-unsupported-compiler src/benchmark_nvidia.cu      -I/home/jsgalvisb/proyecto/src/papi/src      -L/home/jsgalvisb/proyecto/src/papi/src      -Xlinker -rpath,/home/jsgalvisb/proyecto/src/papi/src      -lcublas -lcusparse -lcufft -lnvml -lpapi -lpthread      -o bin/benchmark_titanx
+module load cuda
+nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -lcublas -lcusparse -lcufft -lnvml -lpthread -o benchmark_titanx
 ```
 
 ## SRUN
