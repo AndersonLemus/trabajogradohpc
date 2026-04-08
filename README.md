@@ -39,6 +39,7 @@ source ./setup_env_cuda.sh (Nvidia)
 ```
 g++ -O3 -march=native -std=c++17 src/hpc_dataset.cpp -I${MKLROOT}/include -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o bin/hpc_dataset
 
+
 module load cuda
 nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -lcublas -lcusparse -lcufft -lnvml -lpthread -o benchmark_titanx
 ```
