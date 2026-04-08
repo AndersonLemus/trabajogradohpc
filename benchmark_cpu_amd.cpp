@@ -1,16 +1,4 @@
-/*
- *   g++ -O3 -march=znver4 -fopenmp -std=c++17 benchmark_cpu_amd.cpp \
- *       -I<OpenBLAS> -I<CSparse/Include> -I<fftw3/include> \
- *       -L<OpenBLAS> -L<CSparse/build> -L<fftw3/lib> \
- *       -lopenblas -lcsparse -lfftw3_threads -lfftw3 -lm -lpthread \
- *       -o benchmark_epyc
- *
- * Uso:
- *   ./benchmark_epyc --output resultados_epyc.csv [--threads 64]
- * ============================================================
- */
 #include <chrono>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
