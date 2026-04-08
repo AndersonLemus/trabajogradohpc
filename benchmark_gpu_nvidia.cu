@@ -1,23 +1,3 @@
-/*
- *
- * Compilación:
- *   A100 (sm_80):
- *     nvcc -O3 -arch=sm_80 -allow-unsupported-compiler \
- *          benchmark_gpu_nvidia.cu \
- *          -lcublas -lcusparse -lcufft -lnvml -lpthread \
- *          -o benchmark_a100
- *
- *   Titan X (sm_52):
- *     nvcc -O3 -arch=sm_52 -allow-unsupported-compiler \
- *          benchmark_gpu_nvidia.cu \
- *          -lcublas -lcusparse -lcufft -lnvml -lpthread \
- *          -o benchmark_titanx
- *
- *   ./benchmark_a100   --output resultados_a100.csv
- *   ./benchmark_titanx --output resultados_titanx.csv
- * ============================================================
- */
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
