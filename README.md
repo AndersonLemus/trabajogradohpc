@@ -45,7 +45,6 @@ g++ -O3 -march=znver4 -fopenmp -std=c++17 benchmark_cpu_amd.cpp \
         -lopenblas -lcsparse -lfftw3_threads -lfftw3 -lm -lpthread \
         -o benchmark_epyc
 
-module load cuda
 nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvidia-ml -lcublas -lcusparse -lcufft -lpthread -o benchmark_titanx
 ```
 
