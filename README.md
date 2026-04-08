@@ -22,8 +22,10 @@ sudo dnf install intel-oneapi-mkl-devel
 
 ## SRUN
 ```
-CPU: srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
-GPU: srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --gres=gpu:1 --time=02:00:00 --pty bash -i
+srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
+
+
+srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --gres=gpu:1 --time=02:00:00 --pty bash -i
 ```
 
 ## Ejecutar el .sh según corresponda
