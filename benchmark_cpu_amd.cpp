@@ -1,19 +1,3 @@
-/*
- *   Dell PowerEdge R7625
- *   AMD EPYC 9554 — 64 cores — 3.10 GHz — L3: 384 MB
- *   384 GB DDR5 — BW pico: 460.8 GB/s
- *
- * Kernels:
- *   GEMM  — OpenBLAS  (cblas_dgemm, double)
- *   SpMV  — SuiteSparse CSparse (cs_gaxpy, CSC double)
- *   FFT   — FFTW3     (fftw_plan_dft_r2c_1d, double)
- *
- * Uso:
- *   ./benchmark_epyc --output resultados_epyc.csv
- *   ./benchmark_epyc --output resultados_epyc.csv --threads 64
- * ============================================================
- */
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,15 +14,14 @@ extern "C" {
 #include <cs.h>
 }
 #include <fftw3.h>
-#include <papi.h>   /* solo para RAPL component (backend 3) */
+#include <papi.h> 
 
 #include <dirent.h>
 #include <unistd.h>
 
-// Hardware del nodo
 static constexpr int    CPU_CORES     = 64;
 static constexpr double CPU_FREQ_GHZ  = 3.20;
-static constexpr double CPU_CACHE_MB  = 384.0;   // L3 total EPYC 9554
+static constexpr double CPU_CACHE_MB  = 384.0;
 
 static const int GEMM_N[] = {
     1000, 1500, 2000, 2500, 3000, 3500,
@@ -61,22 +44,17 @@ static const int FFT_N[] = {
 };
 static const int N_FFT = sizeof(FFT_N) / sizeof(FFT_N[0]);
 
-// Resultado por medición
 struct Result {
     std::string kernel;
     int         N          = 0;
     long        nnz        = 0;
     double      sparsity   = 0.0;
-    double      op_intensity = 0.0;   // FLOP / byte
+    double      op_intensity = 0.0; 
     double      time_ms    = 0.0;
     double      energy_j   = 0.0;
     double      gflops     = 0.0;
     double      bw_gbps    = 0.0;
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tiempo — std::chrono::steady_clock
-// ─────────────────────────────────────────────────────────────────────────────
 
 using Clock     = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -94,15 +72,12 @@ static double median(std::vector<double>& v)
 }
 
 // RAPL
-// El driver amd_energy actualiza el contador cada ~1ms.
-// Se mide el delta sobre TODAS las repeticiones y se divide entre runs para obtener la energía media por ejecución.
 static std::vector<std::string> rapl_paths;
 static int  rapl_papi_evset = PAPI_NULL;
 static bool rapl_use_papi   = false;
 
 static void rapl_init()
 {
-    // Backend 1: sysfs amd_energy (AMD EPYC, kernel >= 5.11)
     const char* amd_base = "/sys/class/powercap/amd_energy";
     DIR* d = opendir(amd_base);
     if (d) {
@@ -122,7 +97,6 @@ static void rapl_init()
         return;
     }
 
-    // Backend 2: sysfs intel-rapl (fallback)
     for (auto& p : {
         std::string("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj"),
         std::string("/sys/class/powercap/intel-rapl:0/energy_uj")
@@ -134,8 +108,7 @@ static void rapl_init()
         std::cout << "[RAPL] sysfs intel-rapl: " << rapl_paths[0] << "\n";
         return;
     }
-
-    // Backend 3: PAPI RAPL component
+    
     if (PAPI_library_init(PAPI_VER_CURRENT) == PAPI_VER_CURRENT) {
         int rapl_code = 0;
         if (PAPI_event_name_to_code(
@@ -175,7 +148,6 @@ static long long rapl_read_uj()
     return total;
 }
 
-// CSV
 static void csv_header(std::ofstream& f)
 {
     f << "kernel,N,nnz,sparsity,op_intensity,"
@@ -199,13 +171,12 @@ static void csv_row(std::ofstream& f, const Result& r)
       << r.bw_gbps     << "\n";
 }
 
-// GEMM - OpenBLAS cblas_dgemm
 static Result run_gemm(int N, int nthreads)
 {
     Result r;
     r.kernel   = "GEMM";
     r.N        = N;
-    r.sparsity = 0.0;   // GEMM es denso
+    r.sparsity = 0.0;
     openblas_set_num_threads(nthreads);
 
     std::vector<double> A(N * N), B(N * N), C(N * N, 0.0);
@@ -216,9 +187,9 @@ static Result run_gemm(int N, int nthreads)
     const double alpha = 1.0, beta = 0.0;
     const double flops = 2.0 * N * N * N;
     const double bytes = 3.0 * N * N * 8.0;
-    r.op_intensity = flops / bytes;   // ≈ N/12
+    r.op_intensity = flops / bytes;
 
-    int runs = (N < 2000) ? 20 : (N < 4000) ? 10 : 5;
+    int runs = 7;
     std::vector<double> times(runs);
 
     long long uj_start = rapl_read_uj();
@@ -230,7 +201,8 @@ static Result run_gemm(int N, int nthreads)
         times[i] = elapsed_ms(t0, Clock::now());
     }
 
-    long long uj_end = rapl_read_uj();
+    long long total_energy = rapl_read_uj();
+    long long uj_end = (total_energy/runs);
 
     r.time_ms  = median(times);
     r.energy_j = (double)(uj_end - uj_start) / 1e6 / runs;
@@ -239,7 +211,6 @@ static Result run_gemm(int N, int nthreads)
     return r;
 }
 
-// SpMV - SuiteSparse CSparse
 static Result run_spmv(int N, double sparsity)
 {
     Result r;
@@ -274,7 +245,6 @@ static Result run_spmv(int N, double sparsity)
     const double bytes = r.nnz * (8.0 + 4.0) + (N + 1) * 4.0 + 2.0 * N * 8.0;
     r.op_intensity = flops / bytes;
 
-    // runs dinámico según nnz
     long nnz_est = r.nnz > 0 ? r.nnz : (long)N;
     int runs = (nnz_est <     10000) ? 5000 :
                (nnz_est <    100000) ? 500  :
@@ -292,7 +262,8 @@ static Result run_spmv(int N, double sparsity)
         times[i] = elapsed_ms(t0, Clock::now());
     }
 
-    long long uj_end = rapl_read_uj();
+    long long total_energy = rapl_read_uj();
+    long long uj_end = (total_energy/runs);
 
     r.time_ms  = median(times);
     r.energy_j = (double)(uj_end - uj_start) / 1e6 / runs;
@@ -303,7 +274,6 @@ static Result run_spmv(int N, double sparsity)
     return r;
 }
 
-// FFT — FFTW3 fftw_plan_dft_r2c_1d (real→complex double)
 static Result run_fft(int N, int nthreads)
 {
     Result r;
@@ -321,8 +291,6 @@ static Result run_fft(int N, int nthreads)
     for (int i = 0; i < N; i++)
         in[i] = std::sin(2.0 * M_PI * i / N) + 0.3 * std::cos(6.0 * M_PI * i / N);
 
-    // FFTW_MEASURE: FFTW prueba estrategias y elige la más rápida para este HW.
-    // El plan se crea una sola vez y se reutiliza en todas las repeticiones.
     fftw_plan plan = fftw_plan_dft_r2c_1d(N, in, out, FFTW_MEASURE);
     if (!plan) { std::cerr << "fftw_plan falló\n"; exit(1); }
 
@@ -330,17 +298,11 @@ static Result run_fft(int N, int nthreads)
     const double bytes = N * 8.0 + (N/2 + 1) * 16.0;
     r.op_intensity = flops / bytes;
 
-    int runs = (N <=    1024) ? 5000 :
-               (N <=    8192) ? 1000 :
-               (N <=   65536) ? 200  :
-               (N <=  524288) ? 20   : 5;
-
     std::vector<double> times(runs);
 
     long long uj_start = rapl_read_uj();
 
     for (int i = 0; i < runs; i++) {
-        // Reinicializar entrada: fftw_execute puede modificar el buffer in
         for (int j = 0; j < N; j++)
             in[j] = std::sin(2.0 * M_PI * j / N) + 0.3 * std::cos(6.0 * M_PI * j / N);
         auto t0 = Clock::now();
@@ -348,7 +310,8 @@ static Result run_fft(int N, int nthreads)
         times[i] = elapsed_ms(t0, Clock::now());
     }
 
-    long long uj_end = rapl_read_uj();
+    long long total_energy = rapl_read_uj();
+    long long uj_end = (total_energy/runs);
 
     r.time_ms  = median(times);
     r.energy_j = (double)(uj_end - uj_start) / 1e6 / runs;
@@ -386,7 +349,6 @@ int main(int argc, char* argv[])
     if (!fp) { std::cerr << "No se pudo abrir: " << out_path << "\n"; return 1; }
     csv_header(fp);
 
-    // GEMM
     std::cout << "=== GEMM (OpenBLAS cblas_dgemm) ===\n";
     printf("%-6s  %-12s  %-12s  %-10s  %-10s  %-10s\n",
            "N", "T_cpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)", "Op.Int.");
@@ -402,7 +364,6 @@ int main(int argc, char* argv[])
         csv_row(fp, r); fp.flush();
     }
 
-    // SpMV
     std::cout << "\n=== SpMV (CSparse cs_gaxpy, CSC) ===\n";
     printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_cpu(ms)", "Energy(J)", "GFLOPS");
@@ -423,7 +384,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    // FFT
     printf("\n=== FFT (FFTW3 r2c double, %d hilos) ===\n", nthreads);
     printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
            "N", "T_cpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
@@ -435,7 +395,6 @@ int main(int argc, char* argv[])
         csv_row(fp, r); fp.flush();
     }
 
-    // Limpieza
     if (rapl_use_papi && rapl_papi_evset != PAPI_NULL) {
         long long dummy;
         PAPI_stop(rapl_papi_evset, &dummy);
