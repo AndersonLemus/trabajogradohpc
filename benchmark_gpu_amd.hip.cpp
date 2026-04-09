@@ -1,18 +1,3 @@
-/*
- *   Dell PowerEdge R7625
- *   AMD Instinct MI210 — 64 GB HBM2e — 104 CUs — 1.70 GHz
- *   BW pico: 1638 GB/s
- *
- * Kernels:
- *   GEMM  — rocBLAS   (rocblas_dgemm, double)
- *   SpMV  — rocSPARSE (rocsparse_dcsrmv, CSR, double)
- *   FFT   — rocFFT    (rocfft_execute, real→complex, double)
- *
- * Uso:
- *   ./benchmark_mi210 --output resultados_mi210.csv
- * ============================================================
- */
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
