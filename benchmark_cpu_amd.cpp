@@ -19,29 +19,35 @@ extern "C" {
 #  undef min_size
 #endif
 
-static const int    CPU_CORES    = 8;
+static const int    CPU_CORES    = 64;
 static const double CPU_FREQ_GHZ = 3.10;
 static const double CPU_CACHE_MB = 384.0;
 
 
 static const int GEMM_N[] = {
-    1000, 1500, 2000, 2500, 3000, 3500,
-    4000, 5000, 6000, 7000, 8000
+    512, 640, 768, 896,
+    1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920,
+    2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840,
+    4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192,
+    9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384
 };
 static const int N_GEMM = (int)(sizeof(GEMM_N) / sizeof(GEMM_N[0]));
 
 static const int SPMV_N[] = {
-    100, 200, 500, 1000, 2000, 4000, 8000,
-    16000, 32000, 64000, 100000
+    500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000,
+    6000, 7500, 10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000,
+    60000, 75000, 100000, 125000, 150000, 200000
 };
 static const int N_SPMV = (int)(sizeof(SPMV_N) / sizeof(SPMV_N[0]));
 
-static const double SPARSITIES[] = { 0.001, 0.0001, 0.00001 };
-static const int    N_SP         = 3;
+static const double SPARSITIES[] = { 0.01, 0.001, 0.0001, 0.00001 };
+static const int    N_SP         = 4;
 
 static const int FFT_N[] = {
-    256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 524288, 1048576
+    256, 375, 512, 750, 1024, 1500, 2048, 3000, 4096, 6000,
+    8192, 12000, 16384, 24000, 32768, 48000, 65536, 100000,
+    131072, 200000, 262144, 400000, 524288, 800000,
+    1048576, 1600000, 2097152, 3200000, 4194304
 };
 static const int N_FFT = (int)(sizeof(FFT_N) / sizeof(FFT_N[0]));
 
@@ -57,8 +63,6 @@ struct Result {
     double bw_gbps;
     double mem_mb;
 };
-
-
 
 using Clock     = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
