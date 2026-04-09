@@ -1,3 +1,21 @@
+/*
+ * Compilación:
+ *   # Backend sysfs (por defecto, sin dependencias extra):
+ *   hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_gpu_amd.hip.cpp \
+ *         -lrocblas -lrocsparse -lrocfft -lpthread \
+ *         -o benchmark_mi210
+ *
+ *   # Backend amdsmi (ROCm >= 6.0):
+ *   hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_gpu_amd.hip.cpp \
+ *         -lrocblas -lrocsparse -lrocfft -lpthread -lamdsmi \
+ *         -DUSE_AMDSMI \
+ *         -o benchmark_mi210
+ *
+ * Uso:
+ *   ./benchmark_mi210 --output resultados_mi210.csv
+ * ============================================================
+ */
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -62,23 +80,29 @@ static constexpr double GPU_MEM_BW_GBPS = 1638.0;
 } while(0)
 
 static const int GEMM_N[] = {
-    1000, 1500, 2000, 2500, 3000, 3500,
-    4000, 5000, 6000, 7000, 8000
+    512, 640, 768, 896,
+    1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920,
+    2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840,
+    4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192,
+    9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384
 };
 static const int N_GEMM = (int)(sizeof(GEMM_N) / sizeof(GEMM_N[0]));
 
 static const int SPMV_N[] = {
-    100, 200, 500, 1000, 2000, 4000, 8000,
-    16000, 32000, 64000, 100000
+    500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000,
+    6000, 7500, 10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000,
+    60000, 75000, 100000, 125000, 150000, 200000
 };
 static const int N_SPMV = (int)(sizeof(SPMV_N) / sizeof(SPMV_N[0]));
 
-static const double SPARSITIES[] = { 0.001, 0.0001, 0.00001 };
-static const int    N_SP         = 3;
+static const double SPARSITIES[] = { 0.01, 0.001, 0.0001, 0.00001 };
+static const int    N_SP         = 4;
 
 static const int FFT_N[] = {
-    256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 524288, 1048576
+    256, 375, 512, 750, 1024, 1500, 2048, 3000, 4096, 6000,
+    8192, 12000, 16384, 24000, 32768, 48000, 65536, 100000,
+    131072, 200000, 262144, 400000, 524288, 800000,
+    1048576, 1600000, 2097152, 3200000, 4194304
 };
 static const int N_FFT = (int)(sizeof(FFT_N) / sizeof(FFT_N[0]));
 
@@ -92,13 +116,12 @@ struct Result {
     long        nnz          = 0;
     double      sparsity     = 0.0;
     double      op_intensity = 0.0;
-    double      gpu_time_ms  = 0.0;
+    double      gpu_time_s   = 0.0;
     double      gpu_energy_j = 0.0;
     double      gflops       = 0.0;
     double      bw_gbps      = 0.0;
 };
 
-// Tiempo GPU - hipEvent_t
 static inline double hip_elapsed_ms(hipEvent_t t0, hipEvent_t t1)
 {
     float ms = 0.0f;
@@ -106,7 +129,6 @@ static inline double hip_elapsed_ms(hipEvent_t t0, hipEvent_t t1)
     return (double)ms;
 }
 
-// Energía GPU
 struct PowerCtx {
     volatile int active  = 0;
     double       energy_j = 0.0;
@@ -208,12 +230,11 @@ static double power_stop(PowerCtx* ctx, pthread_t tid)
     return ctx->energy_j;
 }
 
-// CSV
 static void csv_header(std::ofstream& f)
 {
     f << "kernel,N,nnz,sparsity,op_intensity,"
          "gpu_sm_count,gpu_freq_ghz,gpu_mem_gb,gpu_mem_bw_gbps,"
-         "gpu_time_ms,gpu_energy_j,gflops,bw_gbps\n";
+         "gpu_time_s,gpu_energy_j,gflops_GPU,BW_GPU\n";
 }
 
 static void csv_row(std::ofstream& f, const Result& r)
@@ -227,13 +248,12 @@ static void csv_row(std::ofstream& f, const Result& r)
       << GPU_FREQ_GHZ    << ","
       << GPU_MEM_GB      << ","
       << GPU_MEM_BW_GBPS << ","
-      << r.gpu_time_ms   << ","
+      << r.gpu_time_ms / 1e3 << ","
       << r.gpu_energy_j  << ","
       << r.gflops        << ","
       << r.bw_gbps       << "\n";
 }
 
-// GEMM - rocBLAS dgemm
 static Result run_gemm(int N, rocblas_handle blas, PowerCtx* pctx)
 {
     Result r;
@@ -284,10 +304,10 @@ static Result run_gemm(int N, rocblas_handle blas, PowerCtx* pctx)
         tot_ms += hip_elapsed_ms(e0, e1);
     }
 
-    r.gpu_energy_j = power_stop(pctx, tid);
-    r.gpu_time_ms  = tot_ms / BENCH_RUNS;
-    r.gflops       = (flops / 1e9) / (r.gpu_time_ms / 1e3);
-    r.bw_gbps      = (bytes / 1e9) / (r.gpu_time_ms / 1e3);
+    r.gpu_energy_j = power_stop(pctx, tid) / BENCH_RUNS;
+    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gflops       = (flops / 1e9) / r.gpu_time_s;
+    r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
     HIP_CHECK(hipEventDestroy(e0));
     HIP_CHECK(hipEventDestroy(e1));
@@ -295,7 +315,6 @@ static Result run_gemm(int N, rocblas_handle blas, PowerCtx* pctx)
     return r;
 }
 
-// SpMV - rocSPARSE dcsrmv
 static Result run_spmv(int N, double sparsity,
                         rocsparse_handle sp, PowerCtx* pctx)
 {
@@ -304,7 +323,6 @@ static Result run_spmv(int N, double sparsity,
     r.N        = N;
     r.sparsity = sparsity;
 
-    // Cast a long antes de multiplicar para evitar overflow int32 (N >= 46341)
     long nnz = std::max((long)((long)N * N * sparsity), (long)N);
 
     std::vector<int>    h_row(N+1, 0), h_col(nnz);
@@ -380,10 +398,10 @@ static Result run_spmv(int N, double sparsity,
         tot_ms += hip_elapsed_ms(e0, e1);
     }
 
-    r.gpu_energy_j = power_stop(pctx, tid);
-    r.gpu_time_ms  = tot_ms / BENCH_RUNS;
-    r.gflops       = (flops / 1e9) / (r.gpu_time_ms / 1e3);
-    r.bw_gbps      = (bytes / 1e9) / (r.gpu_time_ms / 1e3);
+    r.gpu_energy_j = power_stop(pctx, tid) / BENCH_RUNS;
+    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gflops       = (flops / 1e9) / r.gpu_time_s;
+    r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
     ROCSPARSE_CHECK(rocsparse_destroy_mat_descr(descr));
     ROCSPARSE_CHECK(rocsparse_destroy_mat_info(info));
@@ -394,7 +412,6 @@ static Result run_spmv(int N, double sparsity,
     return r;
 }
 
-// FFT — rocFFT 1D real
 static Result run_fft(int N, PowerCtx* pctx)
 {
     Result r;
@@ -459,10 +476,10 @@ static Result run_fft(int N, PowerCtx* pctx)
         tot_ms += hip_elapsed_ms(e0, e1);
     }
 
-    r.gpu_energy_j = power_stop(pctx, tid);
-    r.gpu_time_ms  = tot_ms / BENCH_RUNS;
-    r.gflops       = (flops / 1e9) / (r.gpu_time_ms / 1e3);
-    r.bw_gbps      = (bytes / 1e9) / (r.gpu_time_ms / 1e3);
+    r.gpu_energy_j = power_stop(pctx, tid) / BENCH_RUNS;
+    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gflops       = (flops / 1e9) / r.gpu_time_s;
+    r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
     ROCFFT_CHECK(rocfft_execution_info_destroy(exec_info));
     ROCFFT_CHECK(rocfft_plan_destroy(plan));
@@ -507,10 +524,9 @@ int main(int argc, char* argv[])
     if (!fp) { std::cerr << "No se pudo abrir: " << out_path << "\n"; return 1; }
     csv_header(fp);
 
-    // GEMM
     std::cout << "=== GEMM (rocBLAS dgemm) ===\n";
     printf("%-6s  %-12s  %-12s  %-10s  %-10s  %-10s\n",
-           "N", "T_gpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)", "Op.Int.");
+           "N", "T_gpu(s)", "Energy(J)", "GFLOPS_GPU", "BW_GPU(GB/s)", "Op.Int.");
 
     for (int i = 0; i < N_GEMM; i++) {
         int N = GEMM_N[i];
@@ -519,14 +535,13 @@ int main(int argc, char* argv[])
         }
         auto r = run_gemm(N, blas, &pctx);
         printf("%-6d  %-12.4f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
-               N, r.gpu_time_ms, r.gpu_energy_j, r.gflops, r.bw_gbps, r.op_intensity);
+               N, r.gpu_time_s, r.gpu_energy_j, r.gflops, r.bw_gbps, r.op_intensity);
         csv_row(fp, r); fp.flush();
     }
 
-    // SpMV
     std::cout << "\n=== SpMV (rocSPARSE dcsrmv) ===\n";
     printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
-           "N", "sparsity", "nnz", "T_gpu(ms)", "Energy(J)", "GFLOPS");
+           "N", "sparsity", "nnz", "T_gpu(s)", "Energy(J)", "GFLOPS_GPU");
 
     for (int si = 0; si < N_SP; si++) {
         double sp = SPARSITIES[si];
@@ -541,24 +556,22 @@ int main(int argc, char* argv[])
             }
             auto r = run_spmv(N, sp, sph, &pctx);
             printf("%-6d  %-8.5f  %-12ld  %-12.4f  %-12.6f  %-10.4f\n",
-                   N, sp, r.nnz, r.gpu_time_ms, r.gpu_energy_j, r.gflops);
+                   N, sp, r.nnz, r.gpu_time_s, r.gpu_energy_j, r.gflops);
             csv_row(fp, r); fp.flush();
         }
     }
 
-    // FFT
     printf("\n=== FFT (rocFFT D2Z) ===\n");
     printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
-           "N", "T_gpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
+           "N", "T_gpu(s)", "Energy(J)", "GFLOPS_GPU", "BW_GPU(GB/s)");
 
     for (int i = 0; i < N_FFT; i++) {
         auto r = run_fft(FFT_N[i], &pctx);
         printf("%-10d  %-12.4f  %-12.6f  %-10.4f  %-10.4f\n",
-               r.N, r.gpu_time_ms, r.gpu_energy_j, r.gflops, r.bw_gbps);
+               r.N, r.gpu_time_s, r.gpu_energy_j, r.gflops, r.bw_gbps);
         csv_row(fp, r); fp.flush();
     }
 
-    // Limpieza
     ROCBLAS_CHECK(rocblas_destroy_handle(blas));
     ROCSPARSE_CHECK(rocsparse_destroy_handle(sph));
     ROCFFT_CHECK(rocfft_cleanup());
