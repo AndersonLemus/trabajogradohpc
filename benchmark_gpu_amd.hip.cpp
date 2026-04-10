@@ -566,6 +566,17 @@ int main(int argc, char* argv[])
         for (int i = 0; i < N_SPMV; i++) {
             int  N   = SPMV_N[i];
             long nnz = std::max((long)((long)N * N * sp), (long)N);
+
+            /* rocsparse_dcsrmv recibe nnz como rocsparse_int (int32).
+             * Límite conservador: 2^30 = 1,073,741,824.
+             * Por encima de ese valor rocSPARSE devuelve code=4 (invalid_size)
+             * en gfx90a con ROCm 7.2, aunque el nnz quepa en int32. */
+            static constexpr long NNZ_ROCSPARSE_MAX = (1L << 30);
+            if (nnz > NNZ_ROCSPARSE_MAX) {
+                printf("N=%-6d sp=%.5f  SKIP (nnz=%ldM > rocsparse int32 limit)\n",
+                       N, sp, nnz / 1000000L); continue;
+            }
+
             size_t need = (size_t)nnz * (sizeof(double) + sizeof(int))
                         + (size_t)(N+1) * sizeof(int)
                         + (size_t)2 * N * sizeof(double);
