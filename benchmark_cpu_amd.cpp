@@ -41,7 +41,7 @@ static const double SPARSITIES[] = { 0.01, 0.001, 0.0001, 0.00001 };
 static const int    N_SP         = 4;
 
 static const int FFT_N[] = {
-    65536, 100000,
+    16384, 24000, 32768, 48000, 65536, 100000,
     131072, 200000, 262144, 400000, 524288, 800000,
     1048576, 1600000, 2097152, 3200000, 4194304
 };
@@ -196,29 +196,31 @@ static Result run_gemm(int N, int nthreads)
     r.mem_mb       = bytes / 1e6;
 
     int runs = (N < 2000) ? 20 : (N < 4000) ? 10 : 5;
-    double* times = (double*)malloc((size_t)runs * sizeof(double));
+    double* times    = (double*)malloc((size_t)runs * sizeof(double));
+    double* energies = (double*)malloc((size_t)runs * sizeof(double));
     const double alpha = 1.0, beta = 0.0;
 
-    /* RAPL fuera del loop: mide energía total de las 'runs' ejecuciones */
-    long long uj0 = rapl_read_uj();
+    /* RAPL por ejecucion individual — evita desbordamiento del contador
+     * (~262 s en intel-rapl 32 bits) cuando N es grande y runs*T > 262 s */
     for (int i = 0; i < runs; i++) {
-        TimePoint t0 = Clock::now();
+        long long uj0 = rapl_read_uj();
+        TimePoint t0  = Clock::now();
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
-        TimePoint t1 = Clock::now();
-        times[i] = elapsed_ms(t0, t1);   /* Bug 2 corregido: usa t1 */
+        TimePoint t1  = Clock::now();
+        long long uj1 = rapl_read_uj();
+        times[i]    = elapsed_ms(t0, t1);
+        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
     }
-    long long uj1 = rapl_read_uj();
 
     r.time_ms  = median(times, runs);
-    /* Bug desbordamiento RAPL corregido: guard >= 0 */
-    r.energy_j = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 / runs : 0.0;
+    r.energy_j = median(energies, runs);
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
 
-    free(A); free(B); free(C); free(times);   /* Bug 3 corregido: sin energies */
+    free(A); free(B); free(C); free(times); free(energies);
     return r;
-}   /* Bug 1 corregido: esta llave cierra run_gemm correctamente */
+}
 
 static Result run_spmv(int N, double sparsity)
 {
@@ -368,7 +370,7 @@ int main(int argc, char* argv[])
 
     printf("=== GEMM (OpenBLAS cblas_dgemm) ===\n");
     printf("%-6s  %-12s  %-12s  %-10s  %-10s  %-10s\n",
-           "N", "T_cpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)", "Op.Int.");
+           "N", "T_cpu(s)", "Energy(J)", "GFLOPS", "BW(GB/s)", "Op.Int.");
 
     for (int i = 0; i < N_GEMM; i++) {
         int N = GEMM_N[i];
@@ -376,14 +378,14 @@ int main(int argc, char* argv[])
             printf("N=%-6d  SKIP (RAM)\n", N); continue;
         }
         Result r = run_gemm(N, nthreads);
-        printf("%-6d  %-12.4f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
-               N, r.time_ms, r.energy_j, r.gflops, r.bw_gbps, r.op_intensity);
+        printf("%-6d  %-12.6f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
+               N, r.time_ms / 1e3, r.energy_j, r.gflops, r.bw_gbps, r.op_intensity);
         csv_row(fp, &r); fflush(fp);
     }
 
     printf("\n=== SpMV (CSparse cs_gaxpy, CSC) ===\n");
     printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
-           "N", "sparsity", "nnz", "T_cpu(ms)", "Energy(J)", "GFLOPS");
+           "N", "sparsity", "nnz", "T_cpu(s)", "Energy(J)", "GFLOPS");
 
     for (int si = 0; si < N_SP; si++) {
         double sp = SPARSITIES[si];
@@ -396,20 +398,20 @@ int main(int argc, char* argv[])
                 printf("N=%-6d sp=%.5f  SKIP (RAM)\n", N, sp); continue;
             }
             Result r = run_spmv(N, sp);
-            printf("%-6d  %-8.5f  %-12ld  %-12.4f  %-12.6f  %-10.4f\n",
-                   N, sp, r.nnz, r.time_ms, r.energy_j, r.gflops);
+            printf("%-6d  %-8.5f  %-12ld  %-12.6f  %-12.6f  %-10.4f\n",
+                   N, sp, r.nnz, r.time_ms / 1e3, r.energy_j, r.gflops);
             csv_row(fp, &r); fflush(fp);
         }
     }
 
     printf("\n=== FFT (FFTW3 r2c double, %d hilos) ===\n", nthreads);
     printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
-           "N", "T_cpu(ms)", "Energy(J)", "GFLOPS", "BW(GB/s)");
+           "N", "T_cpu(s)", "Energy(J)", "GFLOPS", "BW(GB/s)");
 
     for (int i = 0; i < N_FFT; i++) {
         Result r = run_fft(FFT_N[i], nthreads);
-        printf("%-10d  %-12.4f  %-12.6f  %-10.4f  %-10.4f\n",
-               r.N, r.time_ms, r.energy_j, r.gflops, r.bw_gbps);
+        printf("%-10d  %-12.6f  %-12.6f  %-10.4f  %-10.4f\n",
+               r.N, r.time_ms / 1e3, r.energy_j, r.gflops, r.bw_gbps);
         csv_row(fp, &r); fflush(fp);
     }
 
