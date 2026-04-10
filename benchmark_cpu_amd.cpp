@@ -25,7 +25,6 @@ static const double CPU_CACHE_MB = 384.0;
 
 
 static const int GEMM_N[] = {
-    512, 640, 768, 896,
     1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920,
     2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840,
     4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192,
@@ -34,9 +33,8 @@ static const int GEMM_N[] = {
 static const int N_GEMM = (int)(sizeof(GEMM_N) / sizeof(GEMM_N[0]));
 
 static const int SPMV_N[] = {
-    500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000,
-    6000, 7500, 10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000,
-    60000, 75000, 100000, 125000, 150000, 200000
+    10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000,
+    60000, 75000, 100000, 125000, 150000, 200000, 250000, 300000, 400000, 500000
 };
 static const int N_SPMV = (int)(sizeof(SPMV_N) / sizeof(SPMV_N[0]));
 
@@ -44,8 +42,7 @@ static const double SPARSITIES[] = { 0.01, 0.001, 0.0001, 0.00001 };
 static const int    N_SP         = 4;
 
 static const int FFT_N[] = {
-    256, 375, 512, 750, 1024, 1500, 2048, 3000, 4096, 6000,
-    8192, 12000, 16384, 24000, 32768, 48000, 65536, 100000,
+    65536, 100000,
     131072, 200000, 262144, 400000, 524288, 800000,
     1048576, 1600000, 2097152, 3200000, 4194304
 };
@@ -194,19 +191,27 @@ static Result run_gemm(int N, int nthreads)
 
     int runs = (N < 2000) ? 20 : (N < 4000) ? 10 : 5;
     double* times = (double*)malloc((size_t)runs * sizeof(double));
+    double* energies = (double*)malloc((size_t)runs * sizeof(double));
     const double alpha = 1.0, beta = 0.0;
 
-    long long uj0 = rapl_read_uj();
     for (int i = 0; i < runs; i++) {
+        long long uj0 = rapl_read_uj();
         auto t0 = Clock::now();
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
-        times[i] = elapsed_ms(t0, Clock::now());
-    }
-    long long uj1 = rapl_read_uj();
 
+        auto t1 = Clock::now();
+        long long uj1 = rapl_read_uj();
+        times[i] = elapsed_ms(t0, Clock::now());
+        // Control de desbordamiento de RAPL
+        if (uj1 >= uj0) {
+            energies[i] = (double)(uj1 - uj0) / 1e6;
+        } else {
+            energies[i] = 0.0;
+        }
+    }
     r.time_ms  = median(times, runs);
-    r.energy_j = (double)(uj1 - uj0) / 1e6 / runs;
+    r.energy_j = median(energies, runs);
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
 
