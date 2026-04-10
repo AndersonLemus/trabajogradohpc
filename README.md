@@ -44,7 +44,7 @@ g++ -O3 -march=native -std=c++17 src/hpc_dataset.cpp -I${MKLROOT}/include -L${MK
 g++ -O3 -march=znver4 -fopenmp -std=c++17 src/benchmark_cpu_amd.cpp -I /home/jsgalvisb/proyecto/libs/OpenBLAS -I /home/jsgalvisb/proyecto/libs/SuiteSparse-7.7.0/CSparse/Include -I /home/jsgalvisb/proyecto/libs/fftw-3.3.10/api -L /home/jsgalvisb/proyecto/libs/OpenBLAS -L /home/jsgalvisb/proyecto/libs/SuiteSparse-7.7.0/CSparse/build -L /home/jsgalvisb/proyecto/libs/fftw-3.3.10/.libs -lopenblas -lcsparse -lfftw3_threads -lfftw3 -lm -lpthread -o bin/benchmark_epyc
 
 nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvidia-ml -lcublas -lcusparse -lcufft -lpthread -o benchmark_titanx
-hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_gpu_amd.hip.cpp -lrocblas -lrocsparse -lrocfft -lpthread -o benchmark_mi210
+hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_amd.hip.cpp -lrocblas -lrocsparse -lrocfft -lpthread -o benchmark_mi210
 ```
 
 ## Comando para manipulación y uso de ILP
