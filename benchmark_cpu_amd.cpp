@@ -23,7 +23,6 @@ static const int    CPU_CORES    = 64;
 static const double CPU_FREQ_GHZ = 3.10;
 static const double CPU_CACHE_MB = 384.0;
 
-
 static const int GEMM_N[] = {
     1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920,
     2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840,
@@ -89,7 +88,6 @@ static int  rapl_n = 0;
 
 static void rapl_init(void)
 {
-    /* amd_energy sysfs */
     const char* base = "/sys/class/powercap/amd_energy";
     DIR* d = opendir(base);
     if (d) {
@@ -107,8 +105,6 @@ static void rapl_init(void)
         printf("[RAPL] sysfs amd_energy: %d dominio(s)\n", rapl_n);
         return;
     }
-
-    /* intel-rapl */
     const char* ip[] = {
         "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
         "/sys/class/powercap/intel-rapl:0/energy_uj"
@@ -163,6 +159,16 @@ static void csv_row(FILE* f, const Result* r)
         CPU_CORES, CPU_FREQ_GHZ);
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * GEMM — cblas_dgemm
+ * Bug corregido: el documento tenía 4 problemas en run_gemm:
+ *   1. Llave '{' extra que dejaba run_gemm sin cerrar → error de compilación
+ *   2. 'auto t1 = Clock::now()' capturada pero times[i] usaba Clock::now()
+ *      de nuevo → t1 no se usaba nunca (el tiempo medido incluía rapl_read)
+ *   3. 'energies' malloc'd pero free() faltaba al final
+ *   4. Medición RAPL dentro del loop (overhead de fopen en cada iteración)
+ *      → movida fuera: delta total / runs da la energía media por ejecución
+ * ───────────────────────────────────────────────────────────────────────── */
 static Result run_gemm(int N, int nthreads)
 {
     Result r;
@@ -191,33 +197,28 @@ static Result run_gemm(int N, int nthreads)
 
     int runs = (N < 2000) ? 20 : (N < 4000) ? 10 : 5;
     double* times = (double*)malloc((size_t)runs * sizeof(double));
-    double* energies = (double*)malloc((size_t)runs * sizeof(double));
     const double alpha = 1.0, beta = 0.0;
 
+    /* RAPL fuera del loop: mide energía total de las 'runs' ejecuciones */
+    long long uj0 = rapl_read_uj();
     for (int i = 0; i < runs; i++) {
-        long long uj0 = rapl_read_uj();
-        auto t0 = Clock::now();
+        TimePoint t0 = Clock::now();
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
-
-        auto t1 = Clock::now();
-        long long uj1 = rapl_read_uj();
-        times[i] = elapsed_ms(t0, Clock::now());
-        // Control de desbordamiento de RAPL
-        if (uj1 >= uj0) {
-            energies[i] = (double)(uj1 - uj0) / 1e6;
-        } else {
-            energies[i] = 0.0;
-        }
+        TimePoint t1 = Clock::now();
+        times[i] = elapsed_ms(t0, t1);   /* Bug 2 corregido: usa t1 */
     }
+    long long uj1 = rapl_read_uj();
+
     r.time_ms  = median(times, runs);
-    r.energy_j = median(energies, runs);
+    /* Bug desbordamiento RAPL corregido: guard >= 0 */
+    r.energy_j = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 / runs : 0.0;
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
 
-    free(A); free(B); free(C); free(times);
+    free(A); free(B); free(C); free(times);   /* Bug 3 corregido: sin energies */
     return r;
-}
+}   /* Bug 1 corregido: esta llave cierra run_gemm correctamente */
 
 static Result run_spmv(int N, double sparsity)
 {
@@ -269,14 +270,15 @@ static Result run_spmv(int N, double sparsity)
     long long uj0 = rapl_read_uj();
     for (int i = 0; i < runs; i++) {
         memset(y, 0, (size_t)N * sizeof(double));
-        auto t0 = Clock::now();
+        TimePoint t0 = Clock::now();
         cs_gaxpy(A, x, y);
-        times[i] = elapsed_ms(t0, Clock::now());
+        TimePoint t1 = Clock::now();
+        times[i] = elapsed_ms(t0, t1);
     }
     long long uj1 = rapl_read_uj();
 
     r.time_ms  = median(times, runs);
-    r.energy_j = (double)(uj1 - uj0) / 1e6 / runs;
+    r.energy_j = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 / runs : 0.0;
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
 
@@ -321,14 +323,15 @@ static Result run_fft(int N, int nthreads)
     for (int i = 0; i < runs; i++) {
         for (int j = 0; j < N; j++)
             in[j] = sin(2.0 * M_PI * j / N) + 0.3 * cos(6.0 * M_PI * j / N);
-        auto t0 = Clock::now();
+        TimePoint t0 = Clock::now();
         fftw_execute(plan);
-        times[i] = elapsed_ms(t0, Clock::now());
+        TimePoint t1 = Clock::now();
+        times[i] = elapsed_ms(t0, t1);
     }
     long long uj1 = rapl_read_uj();
 
     r.time_ms  = median(times, runs);
-    r.energy_j = (double)(uj1 - uj0) / 1e6 / runs;
+    r.energy_j = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 / runs : 0.0;
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
 
@@ -377,7 +380,7 @@ int main(int argc, char* argv[])
                N, r.time_ms, r.energy_j, r.gflops, r.bw_gbps, r.op_intensity);
         csv_row(fp, &r); fflush(fp);
     }
-    
+
     printf("\n=== SpMV (CSparse cs_gaxpy, CSC) ===\n");
     printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_cpu(ms)", "Energy(J)", "GFLOPS");
