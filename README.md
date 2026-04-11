@@ -36,7 +36,7 @@ srun -p amd -w exadell --nodes=1 --ntasks=1 --gres=gpu:1 --time=02:00:00 --pty b
 ```
 source ./setup_env.sh (Intel)
 source ./setup_env_cuda.sh (Nvidia)
-source ./setup_env_amd_cpu.sh (AMD CPU)
+source ./setup_env_amd_cpu.sh (AMD)
 ```
 
 ## Compilación
