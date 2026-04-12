@@ -54,6 +54,6 @@ python ILP.py --input dataset.csv --exact --solver CPLEX
 ```
 
 ## Link de Collab
-[Link Text](https://colab.research.google.com/drive/14bjIRm0TNDywzpddDNzft9y4cKC842_g?usp=sharing)
+[Collab](https://colab.research.google.com/drive/14bjIRm0TNDywzpddDNzft9y4cKC842_g?usp=sharing)
 
 
