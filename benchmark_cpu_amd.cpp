@@ -32,10 +32,10 @@ static const int GEMM_N[] = {
 static const int N_GEMM = (int)(sizeof(GEMM_N) / sizeof(GEMM_N[0]));
 
 static const int SPMV_N[] = {
-    1000, 2000, 5000, 10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000,
-    60000, 75000, 100000, 125000, 150000, 200000, 250000, 300000, 400000, 500000,
-    1000000, 2000000, 5000000, 10000000
+    10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000,
+    60000, 75000, 100000, 125000, 150000, 200000, 250000, 300000, 400000, 500000
 };
+
 static const int N_SPMV = (int)(sizeof(SPMV_N) / sizeof(SPMV_N[0]));
 
 static const double SPARSITIES[] = { 0.01, 0.001, 0.0001, 0.00001 };
@@ -44,9 +44,7 @@ static const int    N_SP         = 4;
 static const int FFT_N[] = {
     16384, 24000, 32768, 48000, 65536, 100000,
     131072, 200000, 262144, 400000, 524288, 800000,
-    1048576, 1600000, 2097152, 3000000, 3200000, 4194304,
-    6000000, 6400000, 8388608, 12000000, 12800000, 16777216,
-    25000000, 33554432, 50000000, 67108864
+    1048576, 1600000, 2097152, 3200000, 4194304
 };
 static const int N_FFT = (int)(sizeof(FFT_N) / sizeof(FFT_N[0]));
 
@@ -162,16 +160,6 @@ static void csv_row(FILE* f, const Result* r)
         CPU_CORES, CPU_FREQ_GHZ);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * GEMM — cblas_dgemm
- * Bug corregido: el documento tenía 4 problemas en run_gemm:
- *   1. Llave '{' extra que dejaba run_gemm sin cerrar → error de compilación
- *   2. 'auto t1 = Clock::now()' capturada pero times[i] usaba Clock::now()
- *      de nuevo → t1 no se usaba nunca (el tiempo medido incluía rapl_read)
- *   3. 'energies' malloc'd pero free() faltaba al final
- *   4. Medición RAPL dentro del loop (overhead de fopen en cada iteración)
- *      → movida fuera: delta total / runs da la energía media por ejecución
- * ───────────────────────────────────────────────────────────────────────── */
 static Result run_gemm(int N, int nthreads)
 {
     Result r;
@@ -203,15 +191,17 @@ static Result run_gemm(int N, int nthreads)
     double* energies = (double*)malloc((size_t)runs * sizeof(double));
     const double alpha = 1.0, beta = 0.0;
 
-    /* RAPL por ejecucion individual — evita desbordamiento del contador
-     * (~262 s en intel-rapl 32 bits) cuando N es grande y runs*T > 262 s */
+
     for (int i = 0; i < runs; i++) {
         long long uj0 = rapl_read_uj();
         TimePoint t0  = Clock::now();
+        
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
+                    
         TimePoint t1  = Clock::now();
         long long uj1 = rapl_read_uj();
+        
         times[i]    = elapsed_ms(t0, t1);
         energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
     }
@@ -272,9 +262,9 @@ static Result run_spmv(int N, double sparsity)
 
     double* times = (double*)malloc((size_t)runs * sizeof(double));
 
+
     long long uj0 = rapl_read_uj();
     for (int i = 0; i < runs; i++) {
-        memset(y, 0, (size_t)N * sizeof(double));
         TimePoint t0 = Clock::now();
         cs_gaxpy(A, x, y);
         TimePoint t1 = Clock::now();
@@ -302,9 +292,10 @@ static Result run_fft(int N, int nthreads)
     fftw_init_threads();
     fftw_plan_with_nthreads(nthreads);
 
-    double*       in  = (double*)      fftw_malloc((size_t)N * sizeof(double));
+    double* in  = (double*)      fftw_malloc((size_t)N * sizeof(double));
     fftw_complex* out = (fftw_complex*)fftw_malloc((size_t)(N/2+1) * sizeof(fftw_complex));
     if (!in || !out) { fprintf(stderr, "fftw_malloc N=%d\n", N); exit(1); }
+
 
     for (int i = 0; i < N; i++)
         in[i] = sin(2.0 * M_PI * i / N) + 0.3 * cos(6.0 * M_PI * i / N);
@@ -326,8 +317,6 @@ static Result run_fft(int N, int nthreads)
 
     long long uj0 = rapl_read_uj();
     for (int i = 0; i < runs; i++) {
-        for (int j = 0; j < N; j++)
-            in[j] = sin(2.0 * M_PI * j / N) + 0.3 * cos(6.0 * M_PI * j / N);
         TimePoint t0 = Clock::now();
         fftw_execute(plan);
         TimePoint t1 = Clock::now();
