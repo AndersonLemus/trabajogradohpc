@@ -53,4 +53,7 @@ hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_amd.hip.cpp -lrocblas -lroc
 python ILP.py --input dataset.csv --exact --solver CPLEX
 ```
 
+## Link de Collab
+[Link Text](https://colab.research.google.com/drive/14bjIRm0TNDywzpddDNzft9y4cKC842_g?usp=sharing)
+
 
