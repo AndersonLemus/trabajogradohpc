@@ -1,12 +1,6 @@
 /**
- * benchmark_cpu_epyc.cpp
- *
- * Benchmark CPU — AMD EPYC 9554 (Dell PowerEdge R7625)
- * Kernels: GEMM (OpenBLAS), SpMV (CSparse CSC), FFT (FFTW3)
- *
- * Compilación:
  *   g++ -O3 -march=native -std=c++17 benchmark_cpu_epyc.cpp \
- *       -lopenblas -lcsparse -lfftw3 -lfftw3_threads -lpthread -lm \
+ *       -lopenblas -lfftw3 -lfftw3_threads -lpthread -lm \
  *       -o benchmark_cpu_epyc
  */
 
@@ -22,9 +16,6 @@
 #include <algorithm>
 
 #include <cblas.h>
-extern "C" {
-#include <cs.h>
-}
 #include <fftw3.h>
 
 static const int    CPU_CORES    = 64;
@@ -81,22 +72,14 @@ static double median(std::vector<double>& v) {
     size_t m = v.size() / 2;
     return (v.size() % 2 == 0) ? (v[m-1] + v[m]) / 2.0 : v[m];
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// RAPL — descriptor de archivo abierto permanentemente
-//
-// Usar open() + lseek() + read() en lugar de fopen() + fclose() elimina el
-// overhead del sistema de archivos en cada lectura. Para kernels rápidos como
-// SpMV con N pequeño, fopen/fclose puede costar más que el propio kernel.
-//
-// Soporta AMD (amd_energy) e Intel (intel-rapl) automáticamente.
-// ─────────────────────────────────────────────────────────────────────────────
 #define RAPL_MAX 16
 static int  rapl_fds[RAPL_MAX];
 static int  rapl_n = 0;
 
+static const int RAPL_THRESHOLD = 50;
+
 static void rapl_init(void) {
-    // Intentar AMD amd_energy primero
+    /* AMD amd_energy */
     const char* amd_base = "/sys/class/powercap/amd_energy";
     DIR* d = opendir(amd_base);
     if (d) {
@@ -107,19 +90,15 @@ static void rapl_init(void) {
             snprintf(path, sizeof(path),
                      "%s/%s/energy_input", amd_base, e->d_name);
             int fd = open(path, O_RDONLY);
-            if (fd >= 0) {
-                rapl_fds[rapl_n++] = fd;
-            }
+            if (fd >= 0) rapl_fds[rapl_n++] = fd;
         }
         closedir(d);
     }
-
     if (rapl_n > 0) {
-        printf("[RAPL] amd_energy: %d dominio(s) abiertos con fd permanente.\n",
-               rapl_n);
+        printf("[RAPL] amd_energy: %d dominio(s), fd permanente.\n", rapl_n);
         return;
     }
-
+    /* Intel intel-rapl */
     const char* intel_paths[] = {
         "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
         "/sys/class/powercap/intel-rapl:0/energy_uj"
@@ -128,18 +107,16 @@ static void rapl_init(void) {
         int fd = open(intel_paths[i], O_RDONLY);
         if (fd >= 0) {
             rapl_fds[rapl_n++] = fd;
-            printf("[RAPL] intel-rapl: %s abierto con fd permanente.\n",
-                   intel_paths[i]);
+            printf("[RAPL] intel-rapl: %s, fd permanente.\n", intel_paths[i]);
             return;
         }
     }
-
     fprintf(stderr,
-        "[RAPL] No disponible — energy_j = 0 en todos los kernels.\n"
-        "       Para AMD: sudo modprobe amd_energy &&\n"
-        "                 sudo chmod a+r "
+        "[RAPL] No disponible — energy_j = 0.\n"
+        "       AMD:   sudo modprobe amd_energy\n"
+        "              sudo chmod a+r "
         "/sys/class/powercap/amd_energy/*/energy_input\n"
-        "       Para Intel: sudo chmod a+r "
+        "       Intel: sudo chmod a+r "
         "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj\n");
 }
 
@@ -149,10 +126,7 @@ static long long rapl_read_uj(void) {
     for (int i = 0; i < rapl_n; i++) {
         lseek(rapl_fds[i], 0, SEEK_SET);
         ssize_t n = read(rapl_fds[i], buf, sizeof(buf) - 1);
-        if (n > 0) {
-            buf[n] = '\0';
-            total += atoll(buf);
-        }
+        if (n > 0) { buf[n] = '\0'; total += atoll(buf); }
     }
     return total;
 }
@@ -163,27 +137,27 @@ static void rapl_close(void) {
 
 static void csv_header(FILE* f) {
     fprintf(f,
-        "Kernel,N,Sparsity,OI,Memoria_MB,"
+        "Kernel,N,nnz,Sparsity,OI,Memoria_MB,"
         "Tiempo_CPU_s,Energia_CPU_J,GFLOPS_CPU,BW_Medido_GBps,"
         "CPU_Cores,CPU_Freq\n");
 }
 
 static void csv_row(FILE* f, const Result* r) {
     fprintf(f,
-        "%s,%d,%.6g,%.6g,%.6g,"
+        "%s,%d,%ld,%.6g,%.6g,%.6g,"
         "%.9g,%.6g,%.4f,%.4f,"
         "%d,%.2f\n",
-        r->kernel, r->N, r->sparsity, r->op_intensity, r->mem_mb,
+        r->kernel, r->N, r->nnz,
+        r->sparsity, r->op_intensity, r->mem_mb,
         r->time_ms / 1e3, r->energy_j, r->gflops, r->bw_gbps,
         CPU_CORES, CPU_FREQ_GHZ);
 }
-
-
 static Result run_gemm(int N, int nthreads) {
     Result r;
     memset(&r, 0, sizeof(r));
     strncpy(r.kernel, "GEMM", 15);
-    r.N = N;
+    r.N   = N;
+    r.nnz = 0;
 
     openblas_set_num_threads(nthreads);
 
@@ -205,11 +179,9 @@ static Result run_gemm(int N, int nthreads) {
     r.mem_mb       = bytes / 1e6;
 
     int runs = (N < 2000) ? 20 : (N < 4000) ? 10 : 5;
-
     std::vector<double> times(runs), energies(runs);
     const double alpha = 1.0, beta = 0.0;
 
-    // Warm-up
     for (int i = 0; i < 3; i++)
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
@@ -247,55 +219,94 @@ static Result run_spmv(int N, double sparsity) {
     long nnz = (long)((long)N * N * sparsity);
     if (nnz < N) nnz = N;
 
-    cs* T = cs_spalloc(N, N, nnz, 1, 1);
-    if (!T) { fprintf(stderr, "cs_spalloc\n"); exit(1); }
+    int*    row_ptr = (int*)   malloc((size_t)(N + 1) * sizeof(int));
+    int*    col_idx = (int*)   malloc((size_t)nnz     * sizeof(int));
+    double* values  = (double*)malloc((size_t)nnz     * sizeof(double));
+    double* x       = (double*)malloc((size_t)N       * sizeof(double));
+    double* y       = (double*)calloc((size_t)N,        sizeof(double));
+    if (!row_ptr || !col_idx || !values || !x || !y) {
+        fprintf(stderr, "malloc SpMV N=%d nnz=%ld\n", N, nnz); exit(1);
+    }
 
-    srand(77);
+    srand(77);                                
     long per = nnz / N, rem = nnz % N, ptr = 0;
-    for (int col = 0; col < N && ptr < nnz; col++) {
-        long cnt = per + (col < rem ? 1 : 0);
-        for (long j = 0; j < cnt && ptr < nnz; j++) {
-            cs_entry(T, (int)(j * N / cnt) % N, col,
-                     (double)rand() / RAND_MAX + 0.1);
+    row_ptr[0] = 0;
+    for (int i = 0; i < N; i++) {           
+        long cnt = per + (i < rem ? 1 : 0);
+        for (long j = 0; j < cnt; j++) {
+            col_idx[ptr] = (int)(j * N / cnt) % N;
+            values[ptr]  = (double)rand() / RAND_MAX + 0.1;
             ptr++;
         }
+        row_ptr[i + 1] = (int)ptr;
     }
-    cs* A = cs_compress(T);
-    cs_spfree(T);
-    if (!A) { fprintf(stderr, "cs_compress\n"); exit(1); }
-    r.nnz = (A->nz < 0) ? A->p[N] : A->nz;
+    nnz = ptr;
+    r.nnz = nnz;
 
-    double* x = (double*)malloc((size_t)N * sizeof(double));
-    double* y = (double*)calloc((size_t)N, sizeof(double));
-    if (!x || !y) { fprintf(stderr, "malloc SpMV\n"); exit(1); }
     for (int i = 0; i < N; i++) x[i] = (double)rand() / RAND_MAX;
 
-    const double flops = 2.0 * r.nnz;
-    const double bytes = r.nnz * (8.0 + 4.0) + (N + 1) * 4.0 + 2.0 * N * 8.0;
+    const double flops = 2.0 * nnz;
+    const double bytes = (double)nnz * (8.0 + 4.0)  
+                       + (double)(N + 1) * 4.0         
+                       + 2.0 * N * 8.0;
     r.op_intensity = flops / bytes;
     r.mem_mb       = bytes / 1e6;
 
-    long ne = r.nnz > 0 ? r.nnz : (long)N;
-    int runs = (ne <     10000) ? 5000 :
-               (ne <    100000) ? 500  :
-               (ne <   1000000) ? 50   :
-               (ne <  10000000) ? 10   : 5;
+    long ne  = nnz > 0 ? nnz : (long)N;
+    int runs = (ne <     10000L) ? 5000 :
+               (ne <    100000L) ?  500 :
+               (ne <   1000000L) ?   50 :
+               (ne <  10000000L) ?   10 : 5;
 
     std::vector<double> times(runs), energies(runs);
 
-    for (int i = 0; i < 3; i++) cs_gaxpy(A, x, y);
+    for (int w = 0; w < 3; w++) {
+        memset(y, 0, (size_t)N * sizeof(double));
+        for (int row = 0; row < N; row++) {
+            double s = 0.0;
+            for (int k = row_ptr[row]; k < row_ptr[row + 1]; k++)
+                s += values[k] * x[col_idx[k]];
+            y[row] = s;
+        }
+    }
 
-    for (int i = 0; i < runs; i++) {
+    if (runs >= RAPL_THRESHOLD) {
         long long uj0 = rapl_read_uj();
-        TimePoint t0  = Clock::now();
 
-        cs_gaxpy(A, x, y);
+        for (int i = 0; i < runs; i++) {
+            memset(y, 0, (size_t)N * sizeof(double));
+            TimePoint t0 = Clock::now();
+            for (int row = 0; row < N; row++) {
+                double s = 0.0;
+                for (int k = row_ptr[row]; k < row_ptr[row + 1]; k++)
+                    s += values[k] * x[col_idx[k]];
+                y[row] = s;
+            }
+            TimePoint t1 = Clock::now();
+            times[i] = elapsed_ms(t0, t1);
+        }
 
-        TimePoint t1  = Clock::now();
-        long long uj1 = rapl_read_uj();
+        long long uj1          = rapl_read_uj();
+        double    energy_total = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        double    energy_per   = energy_total / runs;
+        for (int i = 0; i < runs; i++) energies[i] = energy_per;
 
-        times[i]    = elapsed_ms(t0, t1);
-        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+    } else {
+        for (int i = 0; i < runs; i++) {
+            memset(y, 0, (size_t)N * sizeof(double));
+            long long uj0 = rapl_read_uj();
+            TimePoint t0  = Clock::now();
+            for (int row = 0; row < N; row++) {
+                double s = 0.0;
+                for (int k = row_ptr[row]; k < row_ptr[row + 1]; k++)
+                    s += values[k] * x[col_idx[k]];
+                y[row] = s;
+            }
+            TimePoint t1  = Clock::now();
+            long long uj1 = rapl_read_uj();
+            times[i]    = elapsed_ms(t0, t1);
+            energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        }
     }
 
     r.time_ms  = median(times);
@@ -303,8 +314,7 @@ static Result run_spmv(int N, double sparsity) {
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
 
-    cs_spfree(A);
-    free(x); free(y);
+    free(row_ptr); free(col_idx); free(values); free(x); free(y);
     return r;
 }
 
@@ -312,33 +322,33 @@ static Result run_fft(int N, int nthreads) {
     Result r;
     memset(&r, 0, sizeof(r));
     strncpy(r.kernel, "FFT", 15);
-    r.N = N;
+    r.N   = N;
+    r.nnz = 0;
 
     fftw_init_threads();
     fftw_plan_with_nthreads(nthreads);
 
     double*       in  = (double*)      fftw_malloc((size_t)N * sizeof(double));
     fftw_complex* out = (fftw_complex*)fftw_malloc(
-                            (size_t)(N/2+1) * sizeof(fftw_complex));
+                            (size_t)(N / 2 + 1) * sizeof(fftw_complex));
     if (!in || !out) { fprintf(stderr, "fftw_malloc N=%d\n", N); exit(1); }
 
     for (int i = 0; i < N; i++)
         in[i] = sin(2.0 * M_PI * i / N) + 0.3 * cos(6.0 * M_PI * i / N);
-
     std::vector<double> in_orig(in, in + N);
 
     fftw_plan plan = fftw_plan_dft_r2c_1d(N, in, out, FFTW_MEASURE);
     if (!plan) { fprintf(stderr, "fftw_plan N=%d\n", N); exit(1); }
 
     const double flops = 5.0 * N * log2((double)N);
-    const double bytes = N * 8.0 + (N/2 + 1) * 16.0;
+    const double bytes = N * 8.0 + (N / 2 + 1) * 16.0;
     r.op_intensity = flops / bytes;
     r.mem_mb       = bytes / 1e6;
 
     int runs = (N <=    1024) ? 5000 :
                (N <=    8192) ? 1000 :
-               (N <=   65536) ? 200  :
-               (N <=  524288) ? 20   : 5;
+               (N <=   65536) ?  200 :
+               (N <=  524288) ?   20 : 5;
 
     std::vector<double> times(runs), energies(runs);
 
@@ -347,19 +357,33 @@ static Result run_fft(int N, int nthreads) {
         fftw_execute(plan);
     }
 
-    for (int i = 0; i < runs; i++) {
-        memcpy(in, in_orig.data(), N * sizeof(double));
-
+    if (runs >= RAPL_THRESHOLD) {
         long long uj0 = rapl_read_uj();
-        TimePoint t0  = Clock::now();
 
-        fftw_execute(plan);
+        for (int i = 0; i < runs; i++) {
+            memcpy(in, in_orig.data(), N * sizeof(double));
+            TimePoint t0 = Clock::now();
+            fftw_execute(plan);
+            TimePoint t1 = Clock::now();
+            times[i] = elapsed_ms(t0, t1);
+        }
 
-        TimePoint t1  = Clock::now();
-        long long uj1 = rapl_read_uj();
+        long long uj1          = rapl_read_uj();
+        double    energy_total = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        double    energy_per   = energy_total / runs;
+        for (int i = 0; i < runs; i++) energies[i] = energy_per;
 
-        times[i]    = elapsed_ms(t0, t1);
-        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+    } else {
+        for (int i = 0; i < runs; i++) {
+            memcpy(in, in_orig.data(), N * sizeof(double));
+            long long uj0 = rapl_read_uj();
+            TimePoint t0  = Clock::now();
+            fftw_execute(plan);
+            TimePoint t1  = Clock::now();
+            long long uj1 = rapl_read_uj();
+            times[i]    = elapsed_ms(t0, t1);
+            energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        }
     }
 
     r.time_ms  = median(times);
@@ -378,8 +402,8 @@ int main(int argc, char* argv[]) {
     int nthreads = 64;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--output")  && i+1 < argc) out_path  = argv[++i];
-        if (!strcmp(argv[i], "--threads") && i+1 < argc) nthreads  = atoi(argv[++i]);
+        if (!strcmp(argv[i], "--output")  && i+1 < argc) out_path = argv[++i];
+        if (!strcmp(argv[i], "--threads") && i+1 < argc) nthreads = atoi(argv[++i]);
     }
 
     printf("============================================================\n"
@@ -388,6 +412,11 @@ int main(int argc, char* argv[]) {
     printf("Hilos OpenBLAS/FFTW : %d\n", nthreads);
     printf("CPU cores / freq    : %d cores / %.2f GHz\n", CPU_CORES, CPU_FREQ_GHZ);
     printf("L3 cache            : %.0f MB\n", CPU_CACHE_MB);
+    printf("SpMV formato        : CSR manual (srand=77, por filas) — "
+           "idéntico a benchmark_amd.hip.cpp\n");
+    printf("RAPL estrategia     : por run si runs < %d; "
+           "fuera del loop si runs >= %d\n",
+           RAPL_THRESHOLD, RAPL_THRESHOLD);
     printf("Resultados          : %s\n\n", out_path);
 
     rapl_init();
@@ -395,7 +424,7 @@ int main(int argc, char* argv[]) {
     FILE* fp = fopen(out_path, "w");
     if (!fp) { fprintf(stderr, "fopen: %s\n", out_path); return 1; }
     csv_header(fp);
-
+    
     printf("=== GEMM (OpenBLAS cblas_dgemm) ===\n");
     printf("%-6s  %-12s  %-12s  %-10s  %-10s  %-10s\n",
            "N", "T_cpu(s)", "Energy(J)", "GFLOPS", "BW(GB/s)", "Op.Int.");
@@ -412,8 +441,8 @@ int main(int argc, char* argv[]) {
         csv_row(fp, &r); fflush(fp);
     }
 
-    printf("\n=== SpMV (CSparse cs_gaxpy, CSC) ===\n");
-    printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
+    printf("\n=== SpMV (CSR manual — compatible cuSPARSE / rocSPARSE) ===\n");
+    printf("%-8s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_cpu(s)", "Energy(J)", "GFLOPS");
 
     for (int si = 0; si < N_SP; si++) {
@@ -428,7 +457,7 @@ int main(int argc, char* argv[]) {
                 printf("N=%-6d sp=%.5f  SKIP (RAM)\n", N, sp); continue;
             }
             Result r = run_spmv(N, sp);
-            printf("%-6d  %-8.5f  %-12ld  %-12.6f  %-12.6f  %-10.4f\n",
+            printf("%-8d  %-8.5f  %-12ld  %-12.6f  %-12.6f  %-10.4f\n",
                    N, sp, r.nnz, r.time_ms / 1e3, r.energy_j, r.gflops);
             csv_row(fp, &r); fflush(fp);
         }
@@ -446,7 +475,7 @@ int main(int argc, char* argv[]) {
     }
 
     fclose(fp);
-    rapl_close();  
+    rapl_close();
     printf("\nCompletado. Resultados en: %s\n", out_path);
     return 0;
 }
