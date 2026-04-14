@@ -122,10 +122,7 @@ static void csv_row(FILE* f,
 }
 
 static void run_gemm(int N, int nthreads, FILE* fp)
-{   
-    //linea importante
-    mkl_set_num_threads(nthreads);
-
+{  
     size_t sz = (size_t)N * N * sizeof(double);
     double* A = (double*)mkl_malloc(sz, 64);
     double* B = (double*)mkl_malloc(sz, 64);
@@ -280,8 +277,6 @@ static void run_spmv(int N, double sparsity, FILE* fp)
 
 static void run_fft(int N, int nthreads, FILE* fp)
 {
-    mkl_set_num_threads(nthreads);
-
     double* in  = (double*)mkl_malloc((size_t)N * sizeof(double), 64);
     double* out = (double*)mkl_malloc((size_t)(N/2+1) * 2 * sizeof(double), 64);
     if (!in || !out) { fprintf(stderr, "mkl_malloc FFT N=%d\n", N); exit(1); }
@@ -357,6 +352,8 @@ int main(int argc, char* argv[])
         if (!strcmp(argv[i], "--output")  && i+1 < argc) out_path  = argv[++i];
         if (!strcmp(argv[i], "--threads") && i+1 < argc) nthreads  = atoi(argv[++i]);
     }
+
+    mkl_set_num_threads(n_threads); 
 
     printf("============================================================\n"
            "  Benchmark CPU — Intel Xeon Gold 5315Y  (HPE XL290n G10+)\n"
