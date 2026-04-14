@@ -40,6 +40,8 @@ source ./setup_env_amd_cpu.sh (AMD)
 ```
 
 ## Compilación
+
+### subtitle 
 ```
 g++ -O3 -march=native -std=c++17 src/benchmark_cpu_intel.cpp -I${MKLROOT}/include -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o bin/cpu_intel_dataset
 g++ -O3 -march=znver4 -fopenmp -std=c++17 src/benchmark_cpu_amd.cpp -I /home/jsgalvisb/proyecto/libs/OpenBLAS -I /home/jsgalvisb/proyecto/libs/SuiteSparse-7.7.0/CSparse/Include -I /home/jsgalvisb/proyecto/libs/fftw-3.3.10/api -L /home/jsgalvisb/proyecto/libs/OpenBLAS -L /home/jsgalvisb/proyecto/libs/SuiteSparse-7.7.0/CSparse/build -L /home/jsgalvisb/proyecto/libs/fftw-3.3.10/.libs -lopenblas -lcsparse -lfftw3_threads -lfftw3 -lm -lpthread -o bin/benchmark_epyc
