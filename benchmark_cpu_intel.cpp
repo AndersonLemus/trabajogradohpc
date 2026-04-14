@@ -122,7 +122,8 @@ static void csv_row(FILE* f,
 }
 
 static void run_gemm(int N, int nthreads, FILE* fp)
-{
+{   
+    //linea importante
     mkl_set_num_threads(nthreads);
 
     size_t sz = (size_t)N * N * sizeof(double);
@@ -250,19 +251,20 @@ static void run_spmv(int N, double sparsity, FILE* fp)
     double* times    = (double*)malloc((size_t)runs * sizeof(double));
     double* energies = (double*)malloc((size_t)runs * sizeof(double));
 
-    long long uj0 = rapl_read_uj();
     for (int i = 0; i < runs; i++) {
         memset(y, 0, (size_t)N * sizeof(double));
+        long long uj0 = rapl_read_uj();
         TimePoint t0 = Clock::now();
         mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE,
                         1.0, A_mkl, descr, x, 0.0, y);
         TimePoint t1 = Clock::now();
+        long long uj1 = rapl_read_uj();
         times[i] = elapsed_s(t0, t1);
+        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
     }
-    long long uj1 = rapl_read_uj();
 
     double t_med  = median(times, runs);
-    double e_med  = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 / runs : 0.0;
+    double e_med  = median(energies, runs);
     double gflops = (flops / 1e9) / t_med;
     double bw     = (bytes / 1e9) / t_med;
 
@@ -318,18 +320,21 @@ static void run_fft(int N, int nthreads, FILE* fp)
     double* times    = (double*)malloc((size_t)runs * sizeof(double));
     double* energies = (double*)malloc((size_t)runs * sizeof(double));
 
-    long long uj0 = rapl_read_uj();
+    
     for (int i = 0; i < runs; i++) {
         memcpy(in, in_orig, (size_t)N * sizeof(double));
+        long long uj0 = rapl_read_uj();
         TimePoint t0 = Clock::now();
         DftiComputeForward(desc, in, out);
         TimePoint t1 = Clock::now();
+        long long uj1 = rapl_read_uj();
         times[i] = elapsed_s(t0, t1);
+        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
     }
-    long long uj1 = rapl_read_uj();
+    
 
     double t_med  = median(times, runs);
-    double e_med  = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 / runs : 0.0;
+    double e_med  = median(energies, runs)
     double gflops = (flops / 1e9) / t_med;
     double bw     = (bytes / 1e9) / t_med;
 
