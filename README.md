@@ -43,7 +43,7 @@ source ./setup_env_amd_cpu.sh (AMD)
 
 ### Thor 
 ```
-g++ -O3 -march=native -std=c++17 src/benchmark_cpu_intel.cpp -I${MKLROOT}/include -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o bin/cpu_intel_dataset
+g++ -O3 -march=native -std=c++17 src/benchmark_cpu_intel.cpp -fopenmp -I${MKLROOT}/include -L${MKLROOT}/lib/intel64 -lmkl_gnu_thread -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o cpu_intel_dataset
 
 nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvidia-ml -lcublas -lcusparse -lcufft -lpthread -o benchmark_titanx
 ```
