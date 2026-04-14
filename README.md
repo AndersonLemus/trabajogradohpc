@@ -55,6 +55,14 @@ g++ -O3 -march=znver4 -fopenmp -std=c++17 src/benchmark_cpu_amd.cpp -I /home/jsg
 hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_amd.hip.cpp -lrocblas -lrocsparse -lrocfft -lpthread -o benchmark_mi210
 ```
 
+### Cartagena (servidor)
+```
+g++ -O3 -march=native -std=c++17 src/benchmark_cpu_intel.cpp -I${MKLROOT}/include -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o bin/cpu_intel_dataset
+
+nvcc -O3 -arch=sm_52  benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvidia-ml -lcublas -lcusparse -lcufft -lpthread -o benchmark_titanx
+```
+
+
 ## Comando para manipulación y uso de ILP
 ```
 python ILP.py --input dataset.csv --exact --solver CPLEX
