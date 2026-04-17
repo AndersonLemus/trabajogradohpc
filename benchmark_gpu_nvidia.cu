@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <pthread.h>
+#include <chrono>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -103,6 +104,8 @@ struct Result {
     double      bw_gbps      = 0.0;
 };
 
+
+
 struct NvmlCtx {
     nvmlDevice_t dev;
     volatile int active   = 0;
@@ -137,6 +140,14 @@ static double nvml_stop(NvmlCtx* ctx, pthread_t tid)
     ctx->active = 0;
     pthread_join(tid, NULL);
     return ctx->energy_j;
+}
+
+double median(std::vector<double>& v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    size_t n = v.size();
+    if (n % 2 == 0) return (v[n/2 - 1] + v[n/2]) / 2.0;
+    return v[n/2];
 }
 
 static int    g_sm_count    = 0;
@@ -194,46 +205,52 @@ static Result run_gemm(int N, cublasHandle_t blas, nvmlDevice_t nvml)
     CUDA_CHECK(cudaMemset(dC, 0, sz));
 
     const double alpha = 1.0, beta = 0.0;
-    cudaEvent_t e0, e1;
-    CUDA_CHECK(cudaEventCreate(&e0));
-    CUDA_CHECK(cudaEventCreate(&e1));
 
-    for (int w = 0; w < WARMUP_RUNS; w++)
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
+
+    //warming
+    for (int w = 0; w < WARMUP_RUNS; w++){
         CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
             N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    NvmlCtx ctx;
-    pthread_t tid = nvml_start(&ctx, nvml);
-    double tot_ms = 0.0;
-
     for (int i = 0; i < BENCH_RUNS; i++) {
-        CUDA_CHECK(cudaEventRecord(e0));
-        CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        //nvml inicializacion
+        NvmlCtx ctx;
+        pthread_t tid = nvml_start(&ctx, nvml);
+
+        auto t_start = std::chrono::steady_clock::now();
+
+        CUDA_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
             N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
-        CUDA_CHECK(cudaEventRecord(e1));
-        CUDA_CHECK(cudaEventSynchronize(e1));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
-        tot_ms += ms;
+
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        auto t_end = std::chrono::steady_clock::now();
+
+        energies[i] = nvml_stop(&ctx, tid);
+        times[i] = std::chrono::duration<double>(t_end - t_start).count();
     }
 
-    r.gpu_energy_j = nvml_stop(&ctx, tid) / BENCH_RUNS;
-    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gpu_time_s   = median(times);
+    r.gpu_energy_j = median(energies);
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
-    CUDA_CHECK(cudaEventDestroy(e0)); CUDA_CHECK(cudaEventDestroy(e1));
     CUDA_CHECK(cudaFree(dA)); CUDA_CHECK(cudaFree(dB)); CUDA_CHECK(cudaFree(dC));
     return r;
-}
+}   
 
 static Result run_spmv(int N, double sparsity,
                         cusparseHandle_t sp, nvmlDevice_t nvml)
 {
-    Result r;
-    r.kernel   = "SpMV";
-    r.N        = N;
-    r.sparsity = sparsity;
+    Result r; r.N = N; r.sparsity = sparsity; r.kernel = "SpMV";
 
     long nnz = std::max((long)((long)N * N * sparsity), (long)N);
 
@@ -254,6 +271,7 @@ static Result run_spmv(int N, double sparsity,
     }
     nnz = ptr;
     r.nnz = nnz;
+
     for (auto& v : h_x) v = (double)rand() / RAND_MAX;
 
     const double flops = 2.0 * nnz;
@@ -284,6 +302,7 @@ static Result run_spmv(int N, double sparsity,
     CUSPARSE_CHECK(cusparseCreateDnVec(&vecX, N, d_x, CUDA_R_64F));
     CUSPARSE_CHECK(cusparseCreateDnVec(&vecY, N, d_y, CUDA_R_64F));
 
+
     const double alpha = 1.0, beta = 0.0;
     size_t buf_sz = 0; void* buf = NULL;
     CUSPARSE_CHECK(cusparseSpMV_bufferSize(sp,
@@ -292,10 +311,7 @@ static Result run_spmv(int N, double sparsity,
         CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buf_sz));
     if (buf_sz) CUDA_CHECK(cudaMalloc(&buf, buf_sz));
 
-    cudaEvent_t e0, e1;
-    CUDA_CHECK(cudaEventCreate(&e0));
-    CUDA_CHECK(cudaEventCreate(&e1));
-
+    //Warming
     for (int w = 0; w < WARMUP_RUNS; w++)
         CUSPARSE_CHECK(cusparseSpMV(sp,
             CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -303,33 +319,35 @@ static Result run_spmv(int N, double sparsity,
             CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buf));
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    NvmlCtx ctx;
-    pthread_t tid = nvml_start(&ctx, nvml);
-    double tot_ms = 0.0;
+    int inner_reps = (N < 100000) ? 1000 : 50;
 
     for (int i = 0; i < BENCH_RUNS; i++) {
-        CUDA_CHECK(cudaEventRecord(e0));
-        CUSPARSE_CHECK(cusparseSpMV(sp,
-            CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, matA, vecX, &beta, vecY,
-            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buf));
-        CUDA_CHECK(cudaEventRecord(e1));
-        CUDA_CHECK(cudaEventSynchronize(e1));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
-        tot_ms += ms;
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        NvmlCtx ctx;
+        pthread_t tid = nvml_start(&ctx, nvml);
+        auto t_start = std::chrono::steady_clock::now();
+
+        for (int ir = 0; ir < inner_reps; ir++) {
+            CUSPARSE_CHECK(cusparseSpMV(sp, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecX, &beta, vecY, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buf));
+        }
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        auto t_end = std::chrono::steady_clock::now();
+        energies[i] = nvml_stop(&ctx, tid) / inner_reps;
+        times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
     }
 
-    double total_energy = nvml_stop(&ctx, tid);
-    r.gpu_energy_j = (total_energy / BENCH_RUNS);
-    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gpu_time_s   = median(times);
+    r.gpu_energy_j = median(energies);
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
+
 
     CUSPARSE_CHECK(cusparseDestroySpMat(matA));
     CUSPARSE_CHECK(cusparseDestroyDnVec(vecX));
     CUSPARSE_CHECK(cusparseDestroyDnVec(vecY));
     if (buf) CUDA_CHECK(cudaFree(buf));
-    CUDA_CHECK(cudaEventDestroy(e0)); CUDA_CHECK(cudaEventDestroy(e1));
     CUDA_CHECK(cudaFree(d_row)); CUDA_CHECK(cudaFree(d_col));
     CUDA_CHECK(cudaFree(d_val)); CUDA_CHECK(cudaFree(d_x));
     CUDA_CHECK(cudaFree(d_y));
@@ -360,37 +378,40 @@ static Result run_fft(int N, nvmlDevice_t nvml)
     cufftHandle plan;
     CUFFT_CHECK(cufftPlan1d(&plan, N, CUFFT_D2Z, 1));
 
-    cudaEvent_t e0, e1;
-    CUDA_CHECK(cudaEventCreate(&e0));
-    CUDA_CHECK(cudaEventCreate(&e1));
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
+
+    int inner_reps = (N < 1048576) ? 500 : 50;
 
     for (int w = 0; w < WARMUP_RUNS; w++)
         CUFFT_CHECK(cufftExecD2Z(plan, d_in, d_out));
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    NvmlCtx ctx;
-    pthread_t tid = nvml_start(&ctx, nvml);
-    double tot_ms = 0.0;
-
     for (int i = 0; i < BENCH_RUNS; i++) {
-        CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), N*sizeof(double),
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaEventRecord(e0));
-        CUFFT_CHECK(cufftExecD2Z(plan, d_in, d_out));
-        CUDA_CHECK(cudaEventRecord(e1));
-        CUDA_CHECK(cudaEventSynchronize(e1));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
-        tot_ms += ms;
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        NvmlCtx ctx;
+        pthread_t tid = nvml_start(&ctx, nvml);
+
+        auto t_start = std::chrono::steady_clock::now();
+
+        for (int ir = 0; ir < inner_reps; ir++) {
+            CUFFT_CHECK(cufftExecD2Z(plan, d_in, d_out));
+        }
+
+        CUDA_CHECK(cudaDeviceSynchronize()); 
+        auto t_end = std::chrono::steady_clock::now();
+        
+        energies[i] = nvml_stop(&ctx, tid) / inner_reps;
+        times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
     }
 
-    double total_energy = nvml_stop(&ctx, tid);
-    r.gpu_energy_j = (total_energy / BENCH_RUNS);
-    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gpu_time_s   = median(times);
+    r.gpu_energy_j = median(energies);
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
     CUFFT_CHECK(cufftDestroy(plan));
-    CUDA_CHECK(cudaEventDestroy(e0)); CUDA_CHECK(cudaEventDestroy(e1));
     CUDA_CHECK(cudaFree(d_in)); CUDA_CHECK(cudaFree(d_out));
     return r;
 }
