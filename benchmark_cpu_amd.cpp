@@ -11,6 +11,7 @@
  */
 
 #include <chrono>
+#include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,11 +21,8 @@
 #include <dirent.h>
 #include <vector>
 #include <algorithm>
-
+#include <omp.h>
 #include <cblas.h>
-extern "C" {
-#include <cs.h>
-}
 #include <fftw3.h>
 #include <Eigen/Sparse>
 #include <Eigen/Core>
@@ -33,9 +31,7 @@ extern "C" {
 using SpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 using Tripleta = Eigen::Triplet<double>;
 static constexpr int BENCH_RUNS = 5;
-
-
-static const int    CPU_CORES    = 64;
+static const int    CPU_CORES = 8;
 static const double CPU_FREQ_GHZ = 3.10;
 static const double CPU_CACHE_MB = 384.0;
 
@@ -249,25 +245,30 @@ static Result run_spmv(int N, double sparsity) {
     r.sparsity = sparsity;
     strncpy(r.kernel, "SpMV_Eigen",15);
 
-    //1. Se calcula 
     long nnz = std::max((long)(N * N * sparsity), (long)N);
     r.nnz = nnz;
 
-    //2. LLenado eficiente mediante tripletas
     std::vector<Tripleta> listaTripletas;
     listaTripletas.reserve(nnz);
 
     srand(77);
-    for (int col = 0; i < N; i++) {
-        //Simplificada para generar datos aleatorios.
-        listaTripletas.push_back(Tripleta(i, i, (double)rand()/RAND_MAX + 0.1))
+
+    long per = nnz / N;
+    long rem = nnz % N;
+
+    for (int i = 0; i < N; i++) {
+        long cnt = per + (i < rem ? 1 : 0);
+        for (long j = 0; j < cnt; j++) {
+            int col = rand() % N; 
+            double val = (double)rand() / RAND_MAX + 0.1;
+            listaTripletas.emplace_back(i, col, val);
+        }
     }
 
     SpMat A(N, N);
-    A.setFromTriplets(listaTripletas.begin(), listaTripletas,end());
-    A.makeCompressed(); //Recomendado para optimizar memoria
+    A.setFromTriplets(listaTripletas.begin(), listaTripletas.end());
+    A.makeCompressed();
 
-    //Vectores de Eigen
     Eigen::VectorXd x = Eigen::VectorXd::Random(N);
     Eigen::VectorXd y(N);
 
@@ -276,31 +277,38 @@ static Result run_spmv(int N, double sparsity) {
     r.op_intensity = flops / bytes;
     r.mem_mb = bytes / 1e6;
 
+    int inner_reps = (N < 50000) ? 1000 : 50;
+
     //Warm-up
     for (int i = 0; i < 3; i++) y = A * x; 
 
     std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
 
     for (int i = 0; i < BENCH_RUNS; i++) {
+        
         long long uj0 = rapl_read_uj();
         TimePoint t0  = Clock::now();
 
-        y = A * x;
+            for (int ir = 0; ir < inner_reps; ir++) {
+                y = A * x;
+            }
 
         TimePoint t1  = Clock::now();
         long long uj1 = rapl_read_uj();
 
-        times[i]    = elapsed_ms(t0, t1);
-        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        double block_time = elapsed_ms(t0, t1);
+        double block_energy = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+
+        times[i]    = block_time / inner_reps;
+        energies[i] = block_energy / inner_reps;
     }
 
     r.time_ms  = median(times);
     r.energy_j = median(energies);
     r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
     r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
-
-    cs_spfree(A);
-    free(x); free(y);
+    double res = y.sum(); 
+    if (res == -999999) std::cout << " ";
     return r;
 }
 
@@ -323,36 +331,40 @@ static Result run_fft(int N, int nthreads) {
     fftw_plan plan = fftw_plan_dft_r2c_1d(N, in, out, FFTW_MEASURE);
     if (!plan) { fprintf(stderr, "fftw_plan N=%d\n", N); exit(1); }
 
-    const double flops = 5.0 * N * log2((double)N);
+    const double flops = 5.0 * (double)N * std::log2((double)N);
     const double bytes = N * 8.0 + (N/2 + 1) * 16.0;
     r.op_intensity = flops / bytes;
     r.mem_mb       = bytes / 1e6;
 
-    int runs = (N <=    1024) ? 5000 :
-               (N <=    8192) ? 1000 :
-               (N <=   65536) ? 200  :
-               (N <=  524288) ? 20   : 5;
+    int inner_reps = (N <= 16384)   ? 1000 :
+                     (N <= 131072)  ? 100  :
+                     (N <= 1048576) ? 10   : 1;
 
-    std::vector<double> times(runs), energies(runs);
+    std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
 
+    //warm-up
     for (int i = 0; i < 3; i++) {
         memcpy(in, in_orig.data(), N * sizeof(double));
         fftw_execute(plan);
     }
 
-    for (int i = 0; i < runs; i++) {
-        memcpy(in, in_orig.data(), N * sizeof(double));
+    for (int i = 0; i < BENCH_RUNS; i++) {
 
         long long uj0 = rapl_read_uj();
         TimePoint t0  = Clock::now();
 
-        fftw_execute(plan);
+        for (int ir = 0; ir < inner_reps; ir++) {
+            fftw_execute(plan);
+        }
 
         TimePoint t1  = Clock::now();
         long long uj1 = rapl_read_uj();
 
-        times[i]    = elapsed_ms(t0, t1);
-        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        double block_time = elapsed_ms(t0, t1);
+        double block_energy = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+
+        times[i]    = block_time / inner_reps;
+        energies[i] = block_energy / inner_reps;
     }
 
     r.time_ms  = median(times);
@@ -368,7 +380,7 @@ static Result run_fft(int N, int nthreads) {
 
 int main(int argc, char* argv[]) {
     const char* out_path = "resultados_epyc.csv";
-    int nthreads = 64;
+    int nthreads =  CPU_CORES;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--output")  && i+1 < argc) out_path  = argv[++i];
@@ -377,7 +389,11 @@ int main(int argc, char* argv[]) {
 
     //Manejo de hilos.
     openblas_set_num_threads(nthreads);
-    fftw_init_threads()
+
+    omp_set_num_threads(nthreads);
+    Eigen::setNbThreads(nthreads); 
+
+    fftw_init_threads();
     fftw_plan_with_nthreads(nthreads);
 
     printf("============================================================\n"
