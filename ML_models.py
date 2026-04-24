@@ -31,7 +31,7 @@ from sklearn.metrics import (
 RANDOM_STATE  = 42
 TEST_SIZE     = 0.20
 CV_FOLDS      = 5        # pliegues para Optuna (rápido) y evaluación final
-OPTUNA_TRIALS = 50       # nº de trials por modelo (sobreescribible con --trials)
+OPTUNA_TRIALS = 100       # nº de trials por modelo (sobreescribible con --trials)
 OPTUNA_CV     = 5        # pliegues dentro de Optuna
 
 PALETTE = {
