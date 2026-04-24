@@ -25,11 +25,13 @@ sudo dnf install intel-oneapi-mkl-devel
 srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
 srun -p fat -w thor --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
 srun -p amd -w exadell --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
+srun -p amd -w smexa --nodes=1 --ntasks=1 --cpus-per-task=8 --time=02:00:00 --pty bash -i
 
 
 srun -p gpu_titan -w felix --nodes=1 --ntasks=1 --gres=gpu:1 --time=02:00:00 --pty bash -i
 srun -p fat -w thor --nodes=1 --ntasks=1 --gres=gpu:1 --time=02:00:00 --pty bash -i
 srun -p amd -w exadell --nodes=1 --ntasks=1 --gres=gpu:1 --time=02:00:00 --pty bash -i
+srun -p amd -w smexa --nodes=1 --ntasks=1 --gres=gpu:1 --time=02:00:00 --pty bash -i
 ```
 
 ## Ejecutar el .sh según corresponda
@@ -55,7 +57,7 @@ g++ -O3 -march=znver4 -fopenmp -std=c++17 src/benchmark_cpu_amd.cpp -I /home/jsg
 hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_amd.hip.cpp -lrocblas -lrocsparse -lrocfft -lpthread -o benchmark_mi210
 ```
 
-### Cartagena (servidor)
+### PACCA
 ```
 g++ -O3 -march=native -std=c++17 src/benchmark_cpu_intel.cpp -I${MKLROOT}/include -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o bin/cpu_intel_dataset
 
@@ -63,9 +65,9 @@ nvcc -O3 -arch=sm_52 -std=c++11  src/benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvid
 ```
 
 
-## Comando para manipulación y uso de ILP
+## Uso de ILP
 ```
-python ILP.py --input dataset.csv --exact --solver CPLEX
+python ILP.py --input dataset.csv
 ```
 
 ## Link de Collab
