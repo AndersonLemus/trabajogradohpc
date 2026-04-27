@@ -1,19 +1,3 @@
-/**
- * Compilar (sin amdsmi):
- *   hipcc --offload-arch=gfx90a -O3 -std=c++17 \
- *         benchmark_amd.hip.cpp \
- *         -lrocblas -lrocsparse -lrocfft \
- *         -lpthread \
- *         -o bin/benchmark_mi210
- *
- * Compilar (con amdsmi):
- *   hipcc --offload-arch=gfx90a -O3 -std=c++17 -DUSE_AMDSMI \
- *         benchmark_amd.hip.cpp \
- *         -lrocblas -lrocsparse -lrocfft -lamd_smi \
- *         -lpthread \
- *         -o bin/benchmark_mi210
- */
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
