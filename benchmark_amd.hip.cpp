@@ -1,3 +1,19 @@
+/**
+ * Compilar (sin amdsmi):
+ *   hipcc --offload-arch=gfx90a -O3 -std=c++17 \
+ *         benchmark_amd.hip.cpp \
+ *         -lrocblas -lrocsparse -lrocfft \
+ *         -lpthread \
+ *         -o bin/benchmark_mi210
+ *
+ * Compilar (con amdsmi):
+ *   hipcc --offload-arch=gfx90a -O3 -std=c++17 -DUSE_AMDSMI \
+ *         benchmark_amd.hip.cpp \
+ *         -lrocblas -lrocsparse -lrocfft -lamd_smi \
+ *         -lpthread \
+ *         -o bin/benchmark_mi210
+ */
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,10 +36,11 @@
   #include <amd_smi/amdsmi.h>
 #endif
 
-static constexpr int    GPU_SM_COUNT    = 104;
-static constexpr double GPU_FREQ_GHZ   = 1.70;
-static constexpr double GPU_MEM_GB     = 64.0;
-static constexpr double GPU_MEM_BW_GBPS = 1638.0;
+// Se rellenan en main() desde hipGetDeviceProperties()
+static int    g_sm_count    = 0;
+static double g_freq_ghz    = 0.0;
+static double g_mem_gb      = 0.0;
+static double g_mem_bw_gbps = 0.0;
 
 #define HIP_CHECK(x) do {                                                   \
     hipError_t _e = (x);                                                    \
@@ -88,8 +105,11 @@ static const int FFT_N[] = {
 };
 static const int N_FFT = (int)(sizeof(FFT_N) / sizeof(FFT_N[0]));
 
-static constexpr int WARMUP_RUNS      = 3;
-static constexpr int BENCH_RUNS       = 5;
+// Límite NNZ para rocsparse (int32)
+static constexpr long NNZ_ROCSPARSE_MAX = (1L << 30);
+
+static constexpr int WARMUP_RUNS       = 3;
+static constexpr int BENCH_RUNS        = 5;
 static constexpr int POWER_INTERVAL_MS = 10;
 
 struct Result {
@@ -112,7 +132,7 @@ static inline double hip_elapsed_ms(hipEvent_t t0, hipEvent_t t1)
 }
 
 struct PowerCtx {
-    volatile int active  = 0;
+    volatile int active   = 0;
     double       energy_j = 0.0;
     char         hwmon_path[256] = {};
 #ifdef USE_AMDSMI
@@ -120,7 +140,6 @@ struct PowerCtx {
 #endif
 };
 
-// Encuentra el hwmon del primer dispositivo amdgpu
 static bool find_amdgpu_hwmon(char* path, size_t len)
 {
     for (int idx = 0; idx < 20; idx++) {
@@ -158,7 +177,6 @@ static void* power_thread(void* arg)
 
     while (ctx->active) {
         double watts = 0.0;
-
 #ifdef USE_AMDSMI
         uint64_t power_uw = 0;
         if (amdsmi_get_power_info(ctx->handle, &power_uw) == AMDSMI_STATUS_SUCCESS)
@@ -225,10 +243,10 @@ static void csv_row(std::ofstream& f, const Result& r)
       << r.nnz           << ","
       << r.sparsity      << ","
       << r.op_intensity  << ","
-      << GPU_SM_COUNT    << ","
-      << GPU_FREQ_GHZ    << ","
-      << GPU_MEM_GB      << ","
-      << GPU_MEM_BW_GBPS << ","
+      << g_sm_count      << ","           // leído de hipGetDeviceProperties
+      << g_freq_ghz      << ","           // leído de hipGetDeviceProperties
+      << g_mem_gb        << ","           // leído de hipGetDeviceProperties
+      << g_mem_bw_gbps   << ","           // calculado de memClock × busWidth
       << r.gpu_time_s    << ","
       << r.gpu_energy_j  << ","
       << r.gflops        << ","
@@ -354,6 +372,7 @@ static Result run_spmv(int N, double sparsity,
         d_val, d_row, d_col, info));
 
     const double alpha = 1.0, beta = 0.0;
+
     hipEvent_t e0, e1;
     HIP_CHECK(hipEventCreate(&e0));
     HIP_CHECK(hipEventCreate(&e1));
@@ -408,14 +427,14 @@ static Result run_fft(int N, PowerCtx* pctx)
     for (int i = 0; i < N; i++)
         h_in[i] = std::sin(2.0*M_PI*i/N) + 0.3*std::cos(6.0*M_PI*i/N);
 
-    double* d_in;
+    double*  d_in;
     double2* d_out;
     HIP_CHECK(hipMalloc(&d_in,  N       * sizeof(double)));
     HIP_CHECK(hipMalloc(&d_out, (N/2+1) * sizeof(double2)));
     HIP_CHECK(hipMemcpy(d_in, h_in.data(), N*sizeof(double), hipMemcpyHostToDevice));
 
     rocfft_plan plan = NULL;
-    size_t fft_N     = (size_t)N;
+    size_t fft_N = (size_t)N;
     ROCFFT_CHECK(rocfft_plan_create(&plan,
         rocfft_placement_notinplace,
         rocfft_transform_type_real_forward,
@@ -478,18 +497,34 @@ int main(int argc, char* argv[])
 
     hipDeviceProp_t prop;
     HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+
+    g_sm_count    = prop.multiProcessorCount;
+    g_freq_ghz    = prop.clockRate / 1e6;            // clockRate en kHz → GHz
+    g_mem_gb      = prop.totalGlobalMem / 1e9;
+    g_mem_bw_gbps = 2.0 * (prop.memoryClockRate * 1e3)
+                        * (prop.memoryBusWidth / 8.0) / 1e9;
+
+    char platform[64] = "AMD_ROCm_GPU";
+    if (strstr(prop.name, "MI210"))       snprintf(platform, 64, "Dell_R7625_MI210");
+    else if (strstr(prop.name, "MI250"))  snprintf(platform, 64, "AMD_MI250");
+    else if (strstr(prop.name, "MI300"))  snprintf(platform, 64, "AMD_MI300");
+    else                                  snprintf(platform, 64, "AMD_%s", prop.name);
+
     std::cout << "============================================================\n"
-              << "  Benchmark GPU — AMD Instinct MI210  (Dell PowerEdge R7625)\n"
+              << "  Benchmark GPU — AMD ROCm  (" << platform << ")\n"
               << "============================================================\n"
               << "GPU detectada  : " << prop.name << "\n"
-              << "Memoria global : " << prop.totalGlobalMem / 1e9 << " GB\n"
+              << "CUs (SM equiv) : " << g_sm_count  << "\n"
+              << "Frecuencia     : " << g_freq_ghz  << " GHz\n"
+              << "Memoria        : " << g_mem_gb    << " GB\n"
+              << "BW pico        : " << g_mem_bw_gbps << " GB/s\n"
               << "Backend potencia: "
 #ifdef USE_AMDSMI
               << "amdsmi\n"
 #else
               << "sysfs hwmon\n"
 #endif
-              << "Resultados     : " << out_path << "\n\n";
+              << "Resultados     : " << out_path    << "\n\n";
 
     ROCFFT_CHECK(rocfft_setup());
 
@@ -506,7 +541,7 @@ int main(int argc, char* argv[])
     csv_header(fp);
 
     std::cout << "=== GEMM (rocBLAS dgemm) ===\n";
-    printf("%-6s  %-12s  %-12s  %-10s  %-10s  %-10s\n",
+    printf("%-6s  %-12s  %-12s  %-12s  %-12s  %-10s\n",
            "N", "T_gpu(s)", "Energy(J)", "GFLOPS_GPU", "BW_GPU(GB/s)", "Op.Int.");
 
     for (int i = 0; i < N_GEMM; i++) {
@@ -515,12 +550,12 @@ int main(int argc, char* argv[])
             printf("N=%-6d  SKIP (VRAM)\n", N); continue;
         }
         auto r = run_gemm(N, blas, &pctx);
-        printf("%-6d  %-12.4f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
+        printf("%-6d  %-12.6f  %-12.6f  %-12.2f  %-12.4f  %-10.4f\n",
                N, r.gpu_time_s, r.gpu_energy_j, r.gflops, r.bw_gbps, r.op_intensity);
         csv_row(fp, r); fp.flush();
     }
 
-    std::cout << "\n=== SpMV (rocSPARSE dcsrmv) ===\n";
+    std::cout << "\n=== SpMV (rocSPARSE dcsrmv, CSR) ===\n";
     printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_gpu(s)", "Energy(J)", "GFLOPS_GPU");
 
@@ -529,33 +564,33 @@ int main(int argc, char* argv[])
         for (int i = 0; i < N_SPMV; i++) {
             int  N   = SPMV_N[i];
             long nnz = std::max((long)((long)N * N * sp), (long)N);
-          
-            static constexpr long NNZ_ROCSPARSE_MAX = (1L << 30);
-            if (nnz > NNZ_ROCSPARSE_MAX) {
-                printf("N=%-6d sp=%.5f  SKIP (nnz=%ldM > rocsparse int32 limit)\n",
-                       N, sp, nnz / 1000000L); continue;
-            }
 
+            if (nnz > NNZ_ROCSPARSE_MAX) {
+                printf("N=%-6d sp=%.5f  SKIP (nnz=%ldM > rocsparse int32)\n",
+                       N, sp, nnz / 1000000L);
+                continue;
+            }
             size_t need = (size_t)nnz * (sizeof(double) + sizeof(int))
                         + (size_t)(N+1) * sizeof(int)
                         + (size_t)2 * N * sizeof(double);
             if (need > (size_t)(prop.totalGlobalMem * 0.78)) {
-                printf("N=%-6d sp=%.5f  SKIP (VRAM)\n", N, sp); continue;
+                printf("N=%-6d sp=%.5f  SKIP (VRAM)\n", N, sp);
+                continue;
             }
             auto r = run_spmv(N, sp, sph, &pctx);
-            printf("%-6d  %-8.5f  %-12ld  %-12.4f  %-12.6f  %-10.4f\n",
+            printf("%-6d  %-8.5f  %-12ld  %-12.6f  %-12.6f  %-10.4f\n",
                    N, sp, r.nnz, r.gpu_time_s, r.gpu_energy_j, r.gflops);
             csv_row(fp, r); fp.flush();
         }
     }
 
-    printf("\n=== FFT (rocFFT D2Z) ===\n");
-    printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
+    std::cout << "\n=== FFT (rocFFT D2Z, doble precisión) ===\n";
+    printf("%-10s  %-12s  %-12s  %-12s  %-12s\n",
            "N", "T_gpu(s)", "Energy(J)", "GFLOPS_GPU", "BW_GPU(GB/s)");
 
     for (int i = 0; i < N_FFT; i++) {
         auto r = run_fft(FFT_N[i], &pctx);
-        printf("%-10d  %-12.4f  %-12.6f  %-10.4f  %-10.4f\n",
+        printf("%-10d  %-12.6f  %-12.6f  %-12.4f  %-12.4f\n",
                r.N, r.gpu_time_s, r.gpu_energy_j, r.gflops, r.bw_gbps);
         csv_row(fp, r); fp.flush();
     }
