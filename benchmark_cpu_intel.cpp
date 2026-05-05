@@ -13,7 +13,7 @@
 #include <mkl_dfti.h>
 
 int g_cpu_cores = 8;
-static const int   BENCH_RUNS    = 5;
+static const int    BENCH_RUNS   = 5;
 static const double CPU_FREQ_GHZ = 2.27;
 static const double CPU_CACHE_MB = 12.0;
 
@@ -55,12 +55,12 @@ static inline double elapsed_s(TimePoint t0, TimePoint t1)
     return std::chrono::duration<double>(t1 - t0).count();
 }
 
-
 static int cmp_double(const void* a, const void* b)
 {
     double da = *(const double*)a, db = *(const double*)b;
     return (da > db) - (da < db);
 }
+
 static double median(double* v, int n)
 {
     qsort(v, (size_t)n, sizeof(double), cmp_double);
@@ -68,90 +68,81 @@ static double median(double* v, int n)
     return (n % 2 == 0) ? (v[m-1] + v[m]) / 2.0 : v[m];
 }
 
-
+// =========================================================================
+// MÓDULO RAPL MULTI-SOCKET
+// =========================================================================
 #define RAPL_MAX 4
 
-static char      rapl_paths[RAPL_MAX][256];
+struct RaplState {
+    long long uj[RAPL_MAX];
+};
+
 static int       rapl_fds[RAPL_MAX];       
-static int       rapl_n       = 0;
-static long long rapl_max_uj  = 0;          
+static long long rapl_max_uj[RAPL_MAX];          
+static int       rapl_n = 0;
 
 static void rapl_init(void)
 {
-    const char* candidates[] = {
-        "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
-        "/sys/class/powercap/intel-rapl:0/energy_uj",
-        "/sys/class/powercap/intel-rapl:0:0/energy_uj",
-        NULL
-    };
+    // Escaneamos dinámicamente hasta 4 posibles sockets en la tarjeta madre
+    for (int i = 0; i < RAPL_MAX; i++) {
+        char path_energy[256];
+        char path_max[256];
+        snprintf(path_energy, sizeof(path_energy), "/sys/class/powercap/intel-rapl:%d/energy_uj", i);
+        snprintf(path_max, sizeof(path_max), "/sys/class/powercap/intel-rapl:%d/max_energy_range_uj", i);
 
-    for (int i = 0; candidates[i] && rapl_n < RAPL_MAX; i++) {
-        int fd = open(candidates[i], O_RDONLY);
-        if (fd < 0) continue;
-
-        strncpy(rapl_paths[rapl_n], candidates[i], 255);
-        rapl_fds[rapl_n] = fd;
-        rapl_n++;
-        printf("[RAPL] %s\n", candidates[i]);
-
-        char max_path[512];
-        const char* slash = strrchr(candidates[i], '/');
-        if (slash) {
-            size_t dir_len = (size_t)(slash - candidates[i]);
-            char dir[512];
-            strncpy(dir, candidates[i], dir_len);
-            dir[dir_len] = '\0';
-            snprintf(max_path, sizeof(max_path), "%s/max_energy_range_uj", dir);
-
-            FILE* fm = fopen(max_path, "r");
-            if (fm) {
-                fscanf(fm, "%lld", &rapl_max_uj);
-                fclose(fm);
-                printf("[RAPL] max_energy_range_uj = %lld uJ (%.3f J)\n",
-                       rapl_max_uj, (double)rapl_max_uj / 1e6);
+        int fd = open(path_energy, O_RDONLY);
+        if (fd >= 0) {
+            rapl_fds[rapl_n] = fd; // Mantener el archivo abierto (cero I/O latencia luego)
+            
+            FILE* fmax = fopen(path_max, "r");
+            if (fmax) {
+                fscanf(fmax, "%lld", &rapl_max_uj[rapl_n]);
+                fclose(fmax);
+            } else {
+                rapl_max_uj[rapl_n] = 262143328850ULL; // Fallback típico de Intel
             }
+            
+            printf("[RAPL] Detectado Socket %d (Max: %.3f J)\n", i, rapl_max_uj[rapl_n] / 1e6);
+            rapl_n++;
         }
-
-        return; 
     }
 
     if (rapl_n == 0) {
         fprintf(stderr,
             "[RAPL] No disponible — Energia_CPU_J = 0.\n"
             "       sudo chmod a+r /sys/class/powercap/intel-rapl*/energy_uj\n");
-        rapl_max_uj = 0;
     }
 }
 
-
-static long long rapl_read_uj(void)
+static RaplState rapl_read(void)
 {
-    long long tot = 0;
-    char buf[32];
+    RaplState state = {0};
+    char buf[64];
     for (int i = 0; i < rapl_n; i++) {
-        if (lseek(rapl_fds[i], 0, SEEK_SET) < 0) continue;
-        ssize_t nb = read(rapl_fds[i], buf, sizeof(buf) - 1);
-        if (nb <= 0) continue;
-        buf[nb] = '\0';
-        tot += atoll(buf);
+        ssize_t nb = pread(rapl_fds[i], buf, sizeof(buf) - 1, 0);
+        if (nb > 0) {
+            buf[nb] = '\0';
+            state.uj[i] = atoll(buf);
+        }
     }
-    return tot;
+    return state;
 }
 
-
-static double rapl_delta_j(long long uj0, long long uj1)
+static double rapl_calc_joules(RaplState s0, RaplState s1)
 {
-    long long delta;
-    if (uj1 >= uj0) {
-        delta = uj1 - uj0;
-    } else if (rapl_max_uj > 0) {
-        delta = (rapl_max_uj - uj0) + uj1;
-        fprintf(stderr, "[RAPL] wraparound detectado (uj0=%lld uj1=%lld max=%lld)\n",
-                uj0, uj1, rapl_max_uj);
-    } else {
-        delta = 0;
+    double total_joules = 0.0;
+    for (int i = 0; i < rapl_n; i++) {
+        long long delta;
+        if (s1.uj[i] >= s0.uj[i]) {
+            delta = s1.uj[i] - s0.uj[i];
+        } else if (rapl_max_uj[i] > 0) {
+            delta = rapl_max_uj[i] - s0.uj[i] + s1.uj[i];
+        } else {
+            delta = 0;
+        }
+        total_joules += (double)delta / 1e6;
     }
-    return (double)delta / 1e6;
+    return total_joules;
 }
 
 static void rapl_close(void)
@@ -159,7 +150,6 @@ static void rapl_close(void)
     for (int i = 0; i < rapl_n; i++)
         close(rapl_fds[i]);
 }
-
 
 static void csv_header(FILE* f)
 {
@@ -181,7 +171,6 @@ static void csv_row(FILE* f,
             g_cpu_cores, CPU_FREQ_GHZ);
 }
 
-
 static void run_gemm(int N, FILE* fp)
 {
     size_t sz = (size_t)N * N * sizeof(double);
@@ -200,36 +189,49 @@ static void run_gemm(int N, FILE* fp)
     const double bytes  = 3.0 * N * N * 8.0;
     const double oi     = flops / bytes;
     const double mem_mb = bytes / 1e6;
-    const double alpha = 1.0, beta = 0.0;
+    const double alpha  = 1.0, beta = 0.0;
 
     const int WARMUP = 3;
     for (int w = 0; w < WARMUP; w++)
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
 
-    int runs = (N < 2000) ? 10 : (N < 5000) ? 5 : 3;
-    std::vector<double> times(runs), energies(runs);
+    TimePoint ta = Clock::now();
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, N, N, alpha, A, N, B, N, beta, C, N);
+    TimePoint tb = Clock::now();
+    
+    double t1rep = elapsed_s(ta, tb);
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;    
+    if (inner_reps > 2000) inner_reps = 2000;
 
-    for (int i = 0; i < runs; i++) {
-        long long uj0 = rapl_read_uj();
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
+
+    for (int i = 0; i < BENCH_RUNS; i++) {
+        
+        RaplState state0 = rapl_read();
         TimePoint t0  = Clock::now();
-
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    N, N, N, alpha, A, N, B, N, beta, C, N);
-
+        
+        for(int ir = 0; ir < inner_reps; ir++) {
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        N, N, N, alpha, A, N, B, N, beta, C, N);
+        }
+        
         TimePoint t1  = Clock::now();
-        long long uj1 = rapl_read_uj();
-
-        times[i]    = elapsed_s(t0, t1);
-        energies[i] = rapl_delta_j(uj0, uj1);   /* wraparound corregido */
+        RaplState state1 = rapl_read();
+        
+        times[i]    = elapsed_s(t0, t1) / inner_reps;
+        energies[i] = rapl_calc_joules(state0, state1) / inner_reps;
     }
 
-    double t_med   = median(times.data(),    runs);
-    double e_med   = median(energies.data(), runs);
-    double gflops  = (flops / 1e9) / t_med;
-    double bw      = (bytes / 1e9) / t_med;
+    double t_med  = median(times.data(), BENCH_RUNS);
+    double e_med  = median(energies.data(), BENCH_RUNS);
+    double gflops = (flops / 1e9) / t_med;
+    double bw     = (bytes / 1e9) / t_med;
 
-    printf("%-6d %-12.6f %-12.6f %-10.2f %-10.4f %-10.4f\n",
+    printf("%-6d  %-12.6f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
            N, t_med, e_med, gflops, bw, oi);
     csv_row(fp, "GEMM", N, 0, 0.0, oi, mem_mb, t_med, e_med, gflops, bw);
     fflush(fp);
@@ -244,8 +246,7 @@ static void run_spmv(int N, double sparsity, FILE* fp)
     if (nnz < N) nnz = N;
 
     if (nnz > NNZ_CPU_MAX) {
-        printf("  N=%-8d sp=%.6f SKIP (nnz=%ldM > int32 limit)\n",
-               N, sparsity, nnz / 1000000L);
+        printf("  N=%-8d sp=%.6f SKIP (nnz=%ldM > int32 limit)\n", N, sparsity, nnz / 1000000L);
         return;
     }
 
@@ -280,72 +281,58 @@ static void run_spmv(int N, double sparsity, FILE* fp)
     for (int i = 0; i < N; i++) x[i] = (double)rand() / RAND_MAX;
 
     const double flops  = 2.0 * nnz;
-    const double bytes  = (double)nnz * (8.0 + 4.0)
-                        + (double)(N+1) * 4.0
-                        + 2.0 * N * 8.0;
+    const double bytes  = (double)nnz * (8.0 + 4.0) + (double)(N+1) * 4.0 + 2.0 * N * 8.0;
     const double oi     = flops / bytes;
     const double mem_mb = bytes / 1e6;
 
     sparse_matrix_t A_mkl;
-    mkl_sparse_d_create_csr(&A_mkl, SPARSE_INDEX_BASE_ZERO,
-                             N, N,
-                             h_row, h_row + 1,
-                             h_col, h_val);
+    mkl_sparse_d_create_csr(&A_mkl, SPARSE_INDEX_BASE_ZERO, N, N, h_row, h_row + 1, h_col, h_val);
     mkl_sparse_optimize(A_mkl);
-    struct matrix_descr descr = { SPARSE_MATRIX_TYPE_GENERAL,
-                                  SPARSE_FILL_MODE_FULL,
-                                  SPARSE_DIAG_NON_UNIT };
+    struct matrix_descr descr = { SPARSE_MATRIX_TYPE_GENERAL, SPARSE_FILL_MODE_FULL, SPARSE_DIAG_NON_UNIT };
 
-    /* Warm-up */
     const int WARMUP = 3;
     for (int w = 0; w < WARMUP; w++) {
         memset(y, 0, (size_t)N * sizeof(double));
-        mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE,
-                        1.0, A_mkl, descr, x, 0.0, y);
+        mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, A_mkl, descr, x, 0.0, y);
     }
 
+    memset(y, 0, (size_t)N * sizeof(double));
+    TimePoint ta = Clock::now();
+    mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, A_mkl, descr, x, 0.0, y);
+    TimePoint tb = Clock::now();
+    
+    double t1rep = elapsed_s(ta, tb);
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 10)   inner_reps = 10;
+    if (inner_reps > 2000) inner_reps = 2000;
 
-    {
+    std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
+
+    for (int i = 0; i < BENCH_RUNS; i++) {
         memset(y, 0, (size_t)N * sizeof(double));
-        TimePoint ta = Clock::now();
-        mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE,
-                        1.0, A_mkl, descr, x, 0.0, y);
-        TimePoint tb = Clock::now();
-        double t1rep = elapsed_s(ta, tb);
-        /* Apuntamos a bloques de ~0.2 s, mínimo 10 reps */
-        int inner_reps = (int)(0.2 / t1rep);
-        if (inner_reps < 10)  inner_reps = 10;
-        if (inner_reps > 2000) inner_reps = 2000;
 
-        std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
+        RaplState state0 = rapl_read();
+        TimePoint t0  = Clock::now();
 
-        for (int i = 0; i < BENCH_RUNS; i++) {
-            memset(y, 0, (size_t)N * sizeof(double));
+        for (int ir = 0; ir < inner_reps; ir++)
+            mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, A_mkl, descr, x, 0.0, y);
 
-            long long uj0 = rapl_read_uj();
-            TimePoint t0  = Clock::now();
+        TimePoint t1  = Clock::now();
+        RaplState state1 = rapl_read();
 
-            for (int ir = 0; ir < inner_reps; ir++)
-                mkl_sparse_d_mv(SPARSE_OPERATION_NON_TRANSPOSE,
-                                1.0, A_mkl, descr, x, 0.0, y);
-
-            TimePoint t1  = Clock::now();
-            long long uj1 = rapl_read_uj();
-
-            times[i]    = elapsed_s(t0, t1) / inner_reps;
-            energies[i] = rapl_delta_j(uj0, uj1) / inner_reps;
-        }
-
-        double t_med  = median(times.data(),    BENCH_RUNS);
-        double e_med  = median(energies.data(), BENCH_RUNS);
-        double gflops = (flops / 1e9) / t_med;
-        double bw     = (bytes / 1e9) / t_med;
-
-        printf("  %-8d %-10.6f %-12ld %-12.6f %-12.6f %-10.4f\n",
-               N, sparsity, nnz, t_med, e_med, gflops);
-        csv_row(fp, "SpMV", N, nnz, sparsity, oi, mem_mb, t_med, e_med, gflops, bw);
-        fflush(fp);
+        times[i]    = elapsed_s(t0, t1) / inner_reps;
+        energies[i] = rapl_calc_joules(state0, state1) / inner_reps;
     }
+
+    double t_med  = median(times.data(),    BENCH_RUNS);
+    double e_med  = median(energies.data(), BENCH_RUNS);
+    double gflops = (flops / 1e9) / t_med;
+    double bw     = (bytes / 1e9) / t_med;
+
+    printf("  %-8d %-10.6f %-12ld %-12.6f %-12.6f %-10.4f\n",
+           N, sparsity, nnz, t_med, e_med, gflops);
+    csv_row(fp, "SpMV", N, nnz, sparsity, oi, mem_mb, t_med, e_med, gflops, bw);
+    fflush(fp);
 
     mkl_sparse_destroy(A_mkl);
     free(h_row); free(h_col); free(h_val); free(x); free(y);
@@ -375,53 +362,49 @@ static void run_fft(int N, FILE* fp)
     const double oi     = flops / bytes;
     const double mem_mb = bytes / 1e6;
 
-    /* Warm-up */
     const int WARMUP = 3;
     for (int w = 0; w < WARMUP; w++) {
         memcpy(in, in_orig, (size_t)N * sizeof(double));
         DftiComputeForward(desc, in, out);
     }
 
+    memcpy(in, in_orig, (size_t)N * sizeof(double));
+    TimePoint ta = Clock::now();
+    DftiComputeForward(desc, in, out);
+    TimePoint tb = Clock::now();
+    
+    double t1rep = elapsed_s(ta, tb);
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 5000) inner_reps = 5000;
 
-    {
+    std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
+
+    for (int i = 0; i < BENCH_RUNS; i++) {
         memcpy(in, in_orig, (size_t)N * sizeof(double));
-        TimePoint ta = Clock::now();
-        DftiComputeForward(desc, in, out);
-        TimePoint tb = Clock::now();
-        double t1rep = elapsed_s(ta, tb);
 
-        int inner_reps = (int)(0.2 / t1rep);
-        if (inner_reps < 5)    inner_reps = 5;
-        if (inner_reps > 5000) inner_reps = 5000;
+        RaplState state0 = rapl_read();
+        TimePoint t0  = Clock::now();
 
-        std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
+        for (int ir = 0; ir < inner_reps; ir++)
+            DftiComputeForward(desc, in, out);
 
-        for (int i = 0; i < BENCH_RUNS; i++) {
-            memcpy(in, in_orig, (size_t)N * sizeof(double));
+        TimePoint t1  = Clock::now();
+        RaplState state1 = rapl_read();
 
-            long long uj0 = rapl_read_uj();
-            TimePoint t0  = Clock::now();
-
-            for (int ir = 0; ir < inner_reps; ir++)
-                DftiComputeForward(desc, in, out);
-
-            TimePoint t1  = Clock::now();
-            long long uj1 = rapl_read_uj();
-
-            times[i]    = elapsed_s(t0, t1) / inner_reps;
-            energies[i] = rapl_delta_j(uj0, uj1) / inner_reps;
-        }
-
-        double t_med  = median(times.data(),    BENCH_RUNS);
-        double e_med  = median(energies.data(), BENCH_RUNS);
-        double gflops = (flops / 1e9) / t_med;
-        double bw     = (bytes / 1e9) / t_med;
-
-        printf("%-12d %-12.6f %-12.6f %-10.4f %-10.4f\n",
-               N, t_med, e_med, gflops, bw);
-        csv_row(fp, "FFT", N, 0, 0.0, oi, mem_mb, t_med, e_med, gflops, bw);
-        fflush(fp);
+        times[i]    = elapsed_s(t0, t1) / inner_reps;
+        energies[i] = rapl_calc_joules(state0, state1) / inner_reps;
     }
+
+    double t_med  = median(times.data(),    BENCH_RUNS);
+    double e_med  = median(energies.data(), BENCH_RUNS);
+    double gflops = (flops / 1e9) / t_med;
+    double bw     = (bytes / 1e9) / t_med;
+
+    printf("%-12d %-12.6f %-12.6f %-10.4f %-10.4f\n",
+           N, t_med, e_med, gflops, bw);
+    csv_row(fp, "FFT", N, 0, 0.0, oi, mem_mb, t_med, e_med, gflops, bw);
+    fflush(fp);
 
     DftiFreeDescriptor(&desc);
     mkl_free(in); mkl_free(out); free(in_orig);
@@ -474,7 +457,6 @@ int main(int argc, char* argv[])
             run_spmv(SPMV_N[i], sp, fp);
     }
 
-    /* ---- FFT ---- */
     printf("\n=== FFT (MKL DFTI real→compleja, double) ===\n");
     printf("%-12s %-12s %-12s %-10s %-10s\n",
            "N", "T_cpu(s)", "Energy(J)", "GFLOPS", "BW(GB/s)");
