@@ -17,10 +17,13 @@
 #include <rocfft/rocfft.h>
 
 #ifdef USE_AMDSMI
-  #include <amd_smi/amdsmi.h>
+  #if defined(AMDSMI_STATUS_SUCCESS)
+    using amdsmi_handle_t = amdsmi_processor_handle;
+  #else
+    using amdsmi_handle_t = amdsmi_processor_handle_t;
+  #endif
 #endif
 
-// Se rellenan en main() desde hipGetDeviceProperties()
 static int    g_sm_count    = 0;
 static double g_freq_ghz    = 0.0;
 static double g_mem_gb      = 0.0;
@@ -89,7 +92,6 @@ static const int FFT_N[] = {
 };
 static const int N_FFT = (int)(sizeof(FFT_N) / sizeof(FFT_N[0]));
 
-// Límite NNZ para rocsparse (int32)
 static constexpr long NNZ_ROCSPARSE_MAX = (1L << 30);
 
 static constexpr int WARMUP_RUNS       = 3;
@@ -108,11 +110,12 @@ struct Result {
     double      bw_gbps      = 0.0;
 };
 
-static inline double hip_elapsed_ms(hipEvent_t t0, hipEvent_t t1)
-{
-    float ms = 0.0f;
-    HIP_CHECK(hipEventElapsedTime(&ms, t0, t1));
-    return (double)ms;
+double median(std::vector<double>& v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    size_t n = v.size();
+    if (n % 2 == 0) return (v[n/2 - 1] + v[n/2]) / 2.0;
+    return v[n/2];
 }
 
 struct PowerCtx {
@@ -227,15 +230,16 @@ static void csv_row(std::ofstream& f, const Result& r)
       << r.nnz           << ","
       << r.sparsity      << ","
       << r.op_intensity  << ","
-      << g_sm_count      << ","           // leído de hipGetDeviceProperties
-      << g_freq_ghz      << ","           // leído de hipGetDeviceProperties
-      << g_mem_gb        << ","           // leído de hipGetDeviceProperties
-      << g_mem_bw_gbps   << ","           // calculado de memClock × busWidth
+      << g_sm_count      << ","           
+      << g_freq_ghz      << ","           
+      << g_mem_gb        << ","           
+      << g_mem_bw_gbps   << ","           
       << r.gpu_time_s    << ","
       << r.gpu_energy_j  << ","
       << r.gflops        << ","
       << r.bw_gbps       << "\n";
 }
+
 
 static Result run_gemm(int N, rocblas_handle blas, PowerCtx* pctx)
 {
@@ -264,36 +268,52 @@ static Result run_gemm(int N, rocblas_handle blas, PowerCtx* pctx)
 
     const double alpha = 1.0, beta = 0.0;
 
-    hipEvent_t e0, e1;
-    HIP_CHECK(hipEventCreate(&e0));
-    HIP_CHECK(hipEventCreate(&e1));
-
-    for (int w = 0; w < WARMUP_RUNS; w++)
+    for (int w = 0; w < WARMUP_RUNS; w++) {
         ROCBLAS_CHECK(rocblas_dgemm(blas,
             rocblas_operation_none, rocblas_operation_none,
             N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+    }
     HIP_CHECK(hipDeviceSynchronize());
 
-    pthread_t tid = power_start(pctx);
-    double tot_ms = 0.0;
+    auto ta = std::chrono::steady_clock::now();
+    ROCBLAS_CHECK(rocblas_dgemm(blas,
+        rocblas_operation_none, rocblas_operation_none,
+        N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+    HIP_CHECK(hipDeviceSynchronize()); // Crucial
+    auto tb = std::chrono::steady_clock::now();
+    
+    double t1rep = std::chrono::duration<double>(tb - ta).count();
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 5000) inner_reps = 5000;
+
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
 
     for (int i = 0; i < BENCH_RUNS; i++) {
-        HIP_CHECK(hipEventRecord(e0, NULL));
-        ROCBLAS_CHECK(rocblas_dgemm(blas,
-            rocblas_operation_none, rocblas_operation_none,
-            N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
-        HIP_CHECK(hipEventRecord(e1, NULL));
-        HIP_CHECK(hipEventSynchronize(e1));
-        tot_ms += hip_elapsed_ms(e0, e1);
+        
+        pthread_t tid = power_start(pctx);
+        auto t_start = std::chrono::steady_clock::now();
+
+        for (int ir = 0; ir < inner_reps; ir++) {
+            ROCBLAS_CHECK(rocblas_dgemm(blas,
+                rocblas_operation_none, rocblas_operation_none,
+                N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+        }
+
+        HIP_CHECK(hipDeviceSynchronize());
+
+        auto t_end = std::chrono::steady_clock::now();
+        
+        energies[i] = power_stop(pctx, tid) / inner_reps;
+        times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
     }
 
-    r.gpu_energy_j = power_stop(pctx, tid) / BENCH_RUNS;
-    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gpu_time_s   = median(times);
+    r.gpu_energy_j = median(energies);
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
-    HIP_CHECK(hipEventDestroy(e0));
-    HIP_CHECK(hipEventDestroy(e1));
     HIP_CHECK(hipFree(dA)); HIP_CHECK(hipFree(dB)); HIP_CHECK(hipFree(dC));
     return r;
 }
@@ -357,39 +377,57 @@ static Result run_spmv(int N, double sparsity,
 
     const double alpha = 1.0, beta = 0.0;
 
-    hipEvent_t e0, e1;
-    HIP_CHECK(hipEventCreate(&e0));
-    HIP_CHECK(hipEventCreate(&e1));
-
-    for (int w = 0; w < WARMUP_RUNS; w++)
+    for (int w = 0; w < WARMUP_RUNS; w++) {
         ROCSPARSE_CHECK(rocsparse_dcsrmv(sp,
             rocsparse_operation_none,
             N, N, (rocsparse_int)nnz, &alpha, descr,
             d_val, d_row, d_col, info, d_x, &beta, d_y));
+    }
     HIP_CHECK(hipDeviceSynchronize());
 
-    pthread_t tid = power_start(pctx);
-    double tot_ms = 0.0;
+    auto ta = std::chrono::steady_clock::now();
+    ROCSPARSE_CHECK(rocsparse_dcsrmv(sp,
+        rocsparse_operation_none,
+        N, N, (rocsparse_int)nnz, &alpha, descr,
+        d_val, d_row, d_col, info, d_x, &beta, d_y));
+    HIP_CHECK(hipDeviceSynchronize());
+    auto tb = std::chrono::steady_clock::now();
+    
+    double t1rep = std::chrono::duration<double>(tb - ta).count();
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 10)   inner_reps = 10;
+    if (inner_reps > 2000) inner_reps = 2000;
+
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
 
     for (int i = 0; i < BENCH_RUNS; i++) {
-        HIP_CHECK(hipEventRecord(e0, NULL));
-        ROCSPARSE_CHECK(rocsparse_dcsrmv(sp,
-            rocsparse_operation_none,
-            N, N, (rocsparse_int)nnz, &alpha, descr,
-            d_val, d_row, d_col, info, d_x, &beta, d_y));
-        HIP_CHECK(hipEventRecord(e1, NULL));
-        HIP_CHECK(hipEventSynchronize(e1));
-        tot_ms += hip_elapsed_ms(e0, e1);
+        
+        pthread_t tid = power_start(pctx);
+        auto t_start = std::chrono::steady_clock::now();
+
+        for (int ir = 0; ir < inner_reps; ir++) {
+            ROCSPARSE_CHECK(rocsparse_dcsrmv(sp,
+                rocsparse_operation_none,
+                N, N, (rocsparse_int)nnz, &alpha, descr,
+                d_val, d_row, d_col, info, d_x, &beta, d_y));
+        }
+
+        HIP_CHECK(hipDeviceSynchronize());
+
+        auto t_end = std::chrono::steady_clock::now();
+        
+        energies[i] = power_stop(pctx, tid) / inner_reps;
+        times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
     }
 
-    r.gpu_energy_j = power_stop(pctx, tid) / BENCH_RUNS;
-    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gpu_time_s   = median(times);
+    r.gpu_energy_j = median(energies);
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
     ROCSPARSE_CHECK(rocsparse_destroy_mat_descr(descr));
     ROCSPARSE_CHECK(rocsparse_destroy_mat_info(info));
-    HIP_CHECK(hipEventDestroy(e0)); HIP_CHECK(hipEventDestroy(e1));
     HIP_CHECK(hipFree(d_row)); HIP_CHECK(hipFree(d_col));
     HIP_CHECK(hipFree(d_val)); HIP_CHECK(hipFree(d_x));
     HIP_CHECK(hipFree(d_y));
@@ -436,39 +474,55 @@ static Result run_fft(int N, PowerCtx* pctx)
         ROCFFT_CHECK(rocfft_execution_info_set_work_buffer(
             exec_info, work_buf, work_sz));
 
-    hipEvent_t e0, e1;
-    HIP_CHECK(hipEventCreate(&e0));
-    HIP_CHECK(hipEventCreate(&e1));
-
     void* in_ptr  = (void*)d_in;
     void* out_ptr = (void*)d_out;
 
-    for (int w = 0; w < WARMUP_RUNS; w++)
+    for (int w = 0; w < WARMUP_RUNS; w++) {
         ROCFFT_CHECK(rocfft_execute(plan, &in_ptr, &out_ptr, exec_info));
+    }
     HIP_CHECK(hipDeviceSynchronize());
 
-    pthread_t tid = power_start(pctx);
-    double tot_ms = 0.0;
+    auto ta = std::chrono::steady_clock::now();
+    ROCFFT_CHECK(rocfft_execute(plan, &in_ptr, &out_ptr, exec_info));
+    HIP_CHECK(hipDeviceSynchronize());
+    auto tb = std::chrono::steady_clock::now();
+    
+    double t1rep = std::chrono::duration<double>(tb - ta).count();
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 5000) inner_reps = 5000;
+
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
 
     for (int i = 0; i < BENCH_RUNS; i++) {
-        HIP_CHECK(hipMemcpy(d_in, h_in.data(), N*sizeof(double),
-                            hipMemcpyHostToDevice));
-        HIP_CHECK(hipEventRecord(e0, NULL));
-        ROCFFT_CHECK(rocfft_execute(plan, &in_ptr, &out_ptr, exec_info));
-        HIP_CHECK(hipEventRecord(e1, NULL));
-        HIP_CHECK(hipEventSynchronize(e1));
-        tot_ms += hip_elapsed_ms(e0, e1);
+        
+        HIP_CHECK(hipMemcpy(d_in, h_in.data(), N*sizeof(double), hipMemcpyHostToDevice));
+        HIP_CHECK(hipDeviceSynchronize()); // Sincronizamos la recarga
+
+        pthread_t tid = power_start(pctx);
+        auto t_start = std::chrono::steady_clock::now();
+
+        for (int ir = 0; ir < inner_reps; ir++) {
+            ROCFFT_CHECK(rocfft_execute(plan, &in_ptr, &out_ptr, exec_info));
+        }
+
+        HIP_CHECK(hipDeviceSynchronize());
+
+        auto t_end = std::chrono::steady_clock::now();
+
+        energies[i] = power_stop(pctx, tid) / inner_reps;
+        times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
     }
 
-    r.gpu_energy_j = power_stop(pctx, tid) / BENCH_RUNS;
-    r.gpu_time_s   = (tot_ms / BENCH_RUNS) / 1e3;
+    r.gpu_time_s   = median(times);
+    r.gpu_energy_j = median(energies);
     r.gflops       = (flops / 1e9) / r.gpu_time_s;
     r.bw_gbps      = (bytes / 1e9) / r.gpu_time_s;
 
     ROCFFT_CHECK(rocfft_execution_info_destroy(exec_info));
     ROCFFT_CHECK(rocfft_plan_destroy(plan));
     if (work_buf) HIP_CHECK(hipFree(work_buf));
-    HIP_CHECK(hipEventDestroy(e0)); HIP_CHECK(hipEventDestroy(e1));
     HIP_CHECK(hipFree(d_in)); HIP_CHECK(hipFree(d_out));
     return r;
 }
