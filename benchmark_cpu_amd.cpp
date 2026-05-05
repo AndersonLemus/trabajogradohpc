@@ -2,7 +2,7 @@
  * benchmark_cpu_epyc.cpp
  *
  * Benchmark CPU — AMD EPYC 9554 (Dell PowerEdge R7625)
- * Kernels: GEMM (OpenBLAS), SpMV (CSparse CSC), FFT (FFTW3)
+ * Kernels: GEMM (OpenBLAS), SpMV (Eigen), FFT (FFTW3)
  *
  * Compilación:
  *   g++ -O3 -march=native -std=c++17 benchmark_cpu_epyc.cpp \
@@ -27,9 +27,9 @@
 #include <Eigen/Sparse>
 #include <Eigen/Core>
 
-//Se usa el espacio de nombres de Eigen.
 using SpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 using Tripleta = Eigen::Triplet<double>;
+
 static constexpr int BENCH_RUNS = 5;
 static const int    CPU_CORES = 8;
 static const double CPU_FREQ_GHZ = 3.10;
@@ -66,7 +66,7 @@ struct Result {
     long   nnz;
     double sparsity;
     double op_intensity;
-    double time_ms;
+    double time_s;       
     double energy_j;
     double gflops;
     double bw_gbps;
@@ -76,31 +76,29 @@ struct Result {
 using Clock     = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
 
-static inline double elapsed_ms(TimePoint t0, TimePoint t1) {
-    return std::chrono::duration<double, std::milli>(t1 - t0).count();
+static inline double elapsed_s(TimePoint t0, TimePoint t1) {
+    return std::chrono::duration<double>(t1 - t0).count();
 }
 
 static double median(std::vector<double>& v) {
+    if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
     size_t m = v.size() / 2;
     return (v.size() % 2 == 0) ? (v[m-1] + v[m]) / 2.0 : v[m];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RAPL — descriptor de archivo abierto permanentemente
-//
-// Usar open() + lseek() + read() en lugar de fopen() + fclose() elimina el
-// overhead del sistema de archivos en cada lectura. Para kernels rápidos como
-// SpMV con N pequeño, fopen/fclose puede costar más que el propio kernel.
-//
-// Soporta AMD (amd_energy) e Intel (intel-rapl) automáticamente.
-// ─────────────────────────────────────────────────────────────────────────────
+
 #define RAPL_MAX 16
-static int  rapl_fds[RAPL_MAX];
-static int  rapl_n = 0;
+
+struct RaplState {
+    long long uj[RAPL_MAX];
+};
+
+static int       rapl_fds[RAPL_MAX];
+static long long rapl_max_uj[RAPL_MAX];
+static int       rapl_n = 0;
 
 static void rapl_init(void) {
-    // Intentar AMD amd_energy primero
     const char* amd_base = "/sys/class/powercap/amd_energy";
     DIR* d = opendir(amd_base);
     if (d) {
@@ -108,19 +106,19 @@ static void rapl_init(void) {
         while ((e = readdir(d)) && rapl_n < RAPL_MAX) {
             if (e->d_name[0] == '.') continue;
             char path[256];
-            snprintf(path, sizeof(path),
-                     "%s/%s/energy_input", amd_base, e->d_name);
+            snprintf(path, sizeof(path), "%s/%s/energy_input", amd_base, e->d_name);
             int fd = open(path, O_RDONLY);
             if (fd >= 0) {
-                rapl_fds[rapl_n++] = fd;
+                rapl_fds[rapl_n] = fd;
+                rapl_max_uj[rapl_n] = 0; // amd_energy usa 64-bit, raramente hace wrap
+                rapl_n++;
             }
         }
         closedir(d);
     }
 
     if (rapl_n > 0) {
-        printf("[RAPL] amd_energy: %d dominio(s) abiertos con fd permanente.\n",
-               rapl_n);
+        printf("[RAPL] amd_energy: %d dominio(s) abiertos (AMD EPYC).\n", rapl_n);
         return;
     }
 
@@ -131,39 +129,51 @@ static void rapl_init(void) {
     for (int i = 0; i < 2; i++) {
         int fd = open(intel_paths[i], O_RDONLY);
         if (fd >= 0) {
-            rapl_fds[rapl_n++] = fd;
-            printf("[RAPL] intel-rapl: %s abierto con fd permanente.\n",
-                   intel_paths[i]);
+            rapl_fds[rapl_n] = fd;
+            rapl_max_uj[rapl_n] = 262143328850ULL; // Wrap estándar Intel
+            printf("[RAPL] intel-rapl: %s abierto.\n", intel_paths[i]);
+            rapl_n++;
             return;
         }
     }
 
     fprintf(stderr,
-        "[RAPL] No disponible — energy_j = 0 en todos los kernels.\n"
-        "       Para AMD: sudo modprobe amd_energy &&\n"
-        "                 sudo chmod a+r "
-        "/sys/class/powercap/amd_energy/*/energy_input\n"
-        "       Para Intel: sudo chmod a+r "
-        "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj\n");
+        "[RAPL] No disponible — energy_j = 0 en todos los kernels.\n");
 }
 
-static long long rapl_read_uj(void) {
-    long long total = 0;
-    char buf[32];
+static RaplState rapl_read(void) {
+    RaplState state = {0};
+    char buf[64];
     for (int i = 0; i < rapl_n; i++) {
-        lseek(rapl_fds[i], 0, SEEK_SET);
-        ssize_t n = read(rapl_fds[i], buf, sizeof(buf) - 1);
-        if (n > 0) {
-            buf[n] = '\0';
-            total += atoll(buf);
+        ssize_t nb = pread(rapl_fds[i], buf, sizeof(buf) - 1, 0);
+        if (nb > 0) {
+            buf[nb] = '\0';
+            state.uj[i] = atoll(buf);
         }
     }
-    return total;
+    return state;
+}
+
+static double rapl_calc_joules(RaplState s0, RaplState s1) {
+    double total_joules = 0.0;
+    for (int i = 0; i < rapl_n; i++) {
+        long long delta;
+        if (s1.uj[i] >= s0.uj[i]) {
+            delta = s1.uj[i] - s0.uj[i];
+        } else if (rapl_max_uj[i] > 0) {
+            delta = rapl_max_uj[i] - s0.uj[i] + s1.uj[i];
+        } else {
+            delta = 0;
+        }
+        total_joules += (double)delta / 1e6;
+    }
+    return total_joules;
 }
 
 static void rapl_close(void) {
     for (int i = 0; i < rapl_n; i++) close(rapl_fds[i]);
 }
+
 
 static void csv_header(FILE* f) {
     fprintf(f,
@@ -178,9 +188,10 @@ static void csv_row(FILE* f, const Result* r) {
         "%.9g,%.6g,%.4f,%.4f,"
         "%d,%.2f\n",
         r->kernel, r->N, r->sparsity, r->op_intensity, r->mem_mb,
-        r->time_ms / 1e3, r->energy_j, r->gflops, r->bw_gbps,
+        r->time_s, r->energy_j, r->gflops, r->bw_gbps,
         CPU_CORES, CPU_FREQ_GHZ);
 }
+
 
 
 static Result run_gemm(int N, int nthreads) {
@@ -205,35 +216,44 @@ static Result run_gemm(int N, int nthreads) {
     const double bytes = 3.0 * N * N * 8.0;
     r.op_intensity = flops / bytes;
     r.mem_mb       = bytes / 1e6;
-
-    int runs = (N < 2000) ? 20 : (N < 4000) ? 10 : 5;
-
-    std::vector<double> times(runs), energies(runs);
     const double alpha = 1.0, beta = 0.0;
 
-    // Warm-up
     for (int i = 0; i < 3; i++)
         cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                     N, N, N, alpha, A, N, B, N, beta, C, N);
 
-    for (int i = 0; i < runs; i++) {
-        long long uj0 = rapl_read_uj();
+    TimePoint ta = Clock::now();
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, N, N, alpha, A, N, B, N, beta, C, N);
+    TimePoint tb = Clock::now();
+    
+    double t1rep = elapsed_s(ta, tb);
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 2000) inner_reps = 2000;
+
+    std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
+
+    for (int i = 0; i < BENCH_RUNS; i++) {
+        RaplState state0 = rapl_read();
         TimePoint t0  = Clock::now();
 
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    N, N, N, alpha, A, N, B, N, beta, C, N);
+        for (int ir = 0; ir < inner_reps; ir++) {
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        N, N, N, alpha, A, N, B, N, beta, C, N);
+        }
 
         TimePoint t1  = Clock::now();
-        long long uj1 = rapl_read_uj();
+        RaplState state1 = rapl_read();
 
-        times[i]    = elapsed_ms(t0, t1);
-        energies[i] = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
+        times[i]    = elapsed_s(t0, t1) / inner_reps;
+        energies[i] = rapl_calc_joules(state0, state1) / inner_reps;
     }
 
-    r.time_ms  = median(times);
+    r.time_s   = median(times);
     r.energy_j = median(energies);
-    r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
-    r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
+    r.gflops   = (flops / 1e9) / r.time_s;
+    r.bw_gbps  = (bytes / 1e9) / r.time_s;
 
     free(A); free(B); free(C);
     return r;
@@ -241,6 +261,7 @@ static Result run_gemm(int N, int nthreads) {
 
 static Result run_spmv(int N, double sparsity) {
     Result r;
+    memset(&r, 0, sizeof(r));
     r.N = N;
     r.sparsity = sparsity;
     strncpy(r.kernel, "SpMV_Eigen",15);
@@ -252,7 +273,6 @@ static Result run_spmv(int N, double sparsity) {
     listaTripletas.reserve(nnz);
 
     srand(77);
-
     long per = nnz / N;
     long rem = nnz % N;
 
@@ -277,38 +297,41 @@ static Result run_spmv(int N, double sparsity) {
     r.op_intensity = flops / bytes;
     r.mem_mb = bytes / 1e6;
 
-    int inner_reps = (N < 50000) ? 1000 : 50;
-
-    //Warm-up
     for (int i = 0; i < 3; i++) y = A * x; 
+
+    TimePoint ta = Clock::now();
+    y = A * x;
+    TimePoint tb = Clock::now();
+    
+    double t1rep = elapsed_s(ta, tb);
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 10)   inner_reps = 10;
+    if (inner_reps > 2000) inner_reps = 2000;
 
     std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
 
     for (int i = 0; i < BENCH_RUNS; i++) {
-        
-        long long uj0 = rapl_read_uj();
+        RaplState state0 = rapl_read();
         TimePoint t0  = Clock::now();
 
-            for (int ir = 0; ir < inner_reps; ir++) {
-                y = A * x;
-            }
+        for (int ir = 0; ir < inner_reps; ir++) {
+            y = A * x;
+        }
 
         TimePoint t1  = Clock::now();
-        long long uj1 = rapl_read_uj();
+        RaplState state1 = rapl_read();
 
-        double block_time = elapsed_ms(t0, t1);
-        double block_energy = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
-
-        times[i]    = block_time / inner_reps;
-        energies[i] = block_energy / inner_reps;
+        times[i]    = elapsed_s(t0, t1) / inner_reps;
+        energies[i] = rapl_calc_joules(state0, state1) / inner_reps;
     }
 
-    r.time_ms  = median(times);
+    r.time_s   = median(times);
     r.energy_j = median(energies);
-    r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
-    r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
+    r.gflops   = (flops / 1e9) / r.time_s;
+    r.bw_gbps  = (bytes / 1e9) / r.time_s;
+    
     double res = y.sum(); 
-    if (res == -999999) std::cout << " ";
+    if (res == -999999) std::cout << " "; // Evitar optimización agresiva del compilador
     return r;
 }
 
@@ -319,8 +342,7 @@ static Result run_fft(int N, int nthreads) {
     r.N = N;
 
     double*       in  = (double*)      fftw_malloc((size_t)N * sizeof(double));
-    fftw_complex* out = (fftw_complex*)fftw_malloc(
-                            (size_t)(N/2+1) * sizeof(fftw_complex));
+    fftw_complex* out = (fftw_complex*)fftw_malloc((size_t)(N/2+1) * sizeof(fftw_complex));
     if (!in || !out) { fprintf(stderr, "fftw_malloc N=%d\n", N); exit(1); }
 
     for (int i = 0; i < N; i++)
@@ -336,21 +358,29 @@ static Result run_fft(int N, int nthreads) {
     r.op_intensity = flops / bytes;
     r.mem_mb       = bytes / 1e6;
 
-    int inner_reps = (N <= 16384)   ? 1000 :
-                     (N <= 131072)  ? 100  :
-                     (N <= 1048576) ? 10   : 1;
-
-    std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
-
-    //warm-up
     for (int i = 0; i < 3; i++) {
         memcpy(in, in_orig.data(), N * sizeof(double));
         fftw_execute(plan);
     }
 
-    for (int i = 0; i < BENCH_RUNS; i++) {
+    memcpy(in, in_orig.data(), N * sizeof(double));
+    TimePoint ta = Clock::now();
+    fftw_execute(plan);
+    TimePoint tb = Clock::now();
+    
+    double t1rep = elapsed_s(ta, tb);
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 5000) inner_reps = 5000;
 
-        long long uj0 = rapl_read_uj();
+    std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
+
+    // 2. Bucle principal
+    for (int i = 0; i < BENCH_RUNS; i++) {
+        // Recargamos datos limpios antes de medir
+        memcpy(in, in_orig.data(), N * sizeof(double));
+
+        RaplState state0 = rapl_read();
         TimePoint t0  = Clock::now();
 
         for (int ir = 0; ir < inner_reps; ir++) {
@@ -358,19 +388,16 @@ static Result run_fft(int N, int nthreads) {
         }
 
         TimePoint t1  = Clock::now();
-        long long uj1 = rapl_read_uj();
+        RaplState state1 = rapl_read();
 
-        double block_time = elapsed_ms(t0, t1);
-        double block_energy = (uj1 >= uj0) ? (double)(uj1 - uj0) / 1e6 : 0.0;
-
-        times[i]    = block_time / inner_reps;
-        energies[i] = block_energy / inner_reps;
+        times[i]    = elapsed_s(t0, t1) / inner_reps;
+        energies[i] = rapl_calc_joules(state0, state1) / inner_reps;
     }
 
-    r.time_ms  = median(times);
+    r.time_s   = median(times);
     r.energy_j = median(energies);
-    r.gflops   = (flops / 1e9) / (r.time_ms / 1e3);
-    r.bw_gbps  = (bytes / 1e9) / (r.time_ms / 1e3);
+    r.gflops   = (flops / 1e9) / r.time_s;
+    r.bw_gbps  = (bytes / 1e9) / r.time_s;
 
     fftw_destroy_plan(plan);
     fftw_free(in); fftw_free(out);
@@ -380,16 +407,14 @@ static Result run_fft(int N, int nthreads) {
 
 int main(int argc, char* argv[]) {
     const char* out_path = "resultados_epyc.csv";
-    int nthreads =  CPU_CORES;
+    int nthreads = CPU_CORES;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--output")  && i+1 < argc) out_path  = argv[++i];
         if (!strcmp(argv[i], "--threads") && i+1 < argc) nthreads  = atoi(argv[++i]);
     }
 
-    //Manejo de hilos.
     openblas_set_num_threads(nthreads);
-
     omp_set_num_threads(nthreads);
     Eigen::setNbThreads(nthreads); 
 
@@ -421,12 +446,11 @@ int main(int argc, char* argv[]) {
         }
         Result r = run_gemm(N, nthreads);
         printf("%-6d  %-12.6f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
-               N, r.time_ms / 1e3, r.energy_j, r.gflops, r.bw_gbps,
-               r.op_intensity);
+               N, r.time_s, r.energy_j, r.gflops, r.bw_gbps, r.op_intensity);
         csv_row(fp, &r); fflush(fp);
     }
 
-    printf("\n=== SpMV (CSparse cs_gaxpy, CSC) ===\n");
+    printf("\n=== SpMV (Eigen SpMat, CSC) ===\n");
     printf("%-6s  %-8s  %-12s  %-12s  %-12s  %-10s\n",
            "N", "sparsity", "nnz", "T_cpu(s)", "Energy(J)", "GFLOPS");
 
@@ -436,14 +460,13 @@ int main(int argc, char* argv[]) {
             int  N   = SPMV_N[i];
             long nnz = (long)((long)N * N * sp);
             if (nnz < N) nnz = N;
-            size_t need = (size_t)nnz * 12 + (size_t)(N+1) * 4
-                        + (size_t)2 * N * 8;
+            size_t need = (size_t)nnz * 12 + (size_t)(N+1) * 4 + (size_t)2 * N * 8;
             if (need > 350ULL << 30) {
                 printf("N=%-6d sp=%.5f  SKIP (RAM)\n", N, sp); continue;
             }
             Result r = run_spmv(N, sp);
             printf("%-6d  %-8.5f  %-12ld  %-12.6f  %-12.6f  %-10.4f\n",
-                   N, sp, r.nnz, r.time_ms / 1e3, r.energy_j, r.gflops);
+                   N, sp, r.nnz, r.time_s, r.energy_j, r.gflops);
             csv_row(fp, &r); fflush(fp);
         }
     }
@@ -455,7 +478,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < N_FFT; i++) {
         Result r = run_fft(FFT_N[i], nthreads);
         printf("%-10d  %-12.6f  %-12.6f  %-10.4f  %-10.4f\n",
-               r.N, r.time_ms / 1e3, r.energy_j, r.gflops, r.bw_gbps);
+               r.N, r.time_s, r.energy_j, r.gflops, r.bw_gbps);
         csv_row(fp, &r); fflush(fp);
     }
 
