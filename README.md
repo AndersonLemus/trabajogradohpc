@@ -54,6 +54,8 @@ nvcc -O3 -arch=sm_52 -allow-unsupported-compiler benchmark_gpu_nvidia.cu -L/usr/
 ```
 g++ -O3 -march=znver4 -fopenmp -std=c++17 src/benchmark_cpu_amd.cpp -I /home/jsgalvisb/proyecto/libs/OpenBLAS -I /home/jsgalvisb/proyecto/libs/SuiteSparse-7.7.0/CSparse/Include -I /home/jsgalvisb/proyecto/libs/fftw-3.3.10/api -L /home/jsgalvisb/proyecto/libs/OpenBLAS -L /home/jsgalvisb/proyecto/libs/SuiteSparse-7.7.0/CSparse/build -L /home/jsgalvisb/proyecto/libs/fftw-3.3.10/.libs -lopenblas -lcsparse -lfftw3_threads -lfftw3 -lm -lpthread -o bin/benchmark_epyc
 
+g++ -O3 -march=native -std=c++17 benchmark_cpu_epyc.cpp -lopenblas -lcsparse -lfftw3 -lfftw3_threads -lpthread -lm -o benchmark_cpu_epyc
+
 hipcc -O3 --offload-arch=gfx90a -std=c++17 benchmark_amd.hip.cpp -lrocblas -lrocsparse -lrocfft -lpthread -o benchmark_smexa_gpu
 ```
 
