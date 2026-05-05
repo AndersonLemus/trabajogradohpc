@@ -104,8 +104,6 @@ struct Result {
     double      bw_gbps      = 0.0;
 };
 
-
-
 struct NvmlCtx {
     nvmlDevice_t dev;
     volatile int active   = 0;
@@ -209,33 +207,41 @@ static Result run_gemm(int N, cublasHandle_t blas, nvmlDevice_t nvml)
     std::vector<double> times(BENCH_RUNS);
     std::vector<double> energies(BENCH_RUNS);
 
-    //warming
     for (int w = 0; w < WARMUP_RUNS; w++){
         CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
             N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
-        CUDA_CHECK(cudaDeviceSynchronize());
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
+    auto ta = std::chrono::steady_clock::now();
+    CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
+        N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+    CUDA_CHECK(cudaDeviceSynchronize()); // Crucial en GPU
+    auto tb = std::chrono::steady_clock::now();
+    
+    double t1rep = std::chrono::duration<double>(tb - ta).count();
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 5000) inner_reps = 5000;
+
     for (int i = 0; i < BENCH_RUNS; i++) {
         
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        //nvml inicializacion
         NvmlCtx ctx;
         pthread_t tid = nvml_start(&ctx, nvml);
 
         auto t_start = std::chrono::steady_clock::now();
 
-        CUDA_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
-            N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+        for (int ir = 0; ir < inner_reps; ir++) {
+            CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N,
+                N, N, N, &alpha, dA, N, dB, N, &beta, dC, N));
+        }
 
         CUDA_CHECK(cudaDeviceSynchronize());
 
         auto t_end = std::chrono::steady_clock::now();
 
-        energies[i] = nvml_stop(&ctx, tid);
-        times[i] = std::chrono::duration<double>(t_end - t_start).count();
+        energies[i] = nvml_stop(&ctx, tid) / inner_reps;
+        times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
     }
 
     r.gpu_time_s   = median(times);
@@ -247,8 +253,7 @@ static Result run_gemm(int N, cublasHandle_t blas, nvmlDevice_t nvml)
     return r;
 }   
 
-static Result run_spmv(int N, double sparsity,
-                        cusparseHandle_t sp, nvmlDevice_t nvml)
+static Result run_spmv(int N, double sparsity, cusparseHandle_t sp, nvmlDevice_t nvml)
 {
     Result r; r.N = N; r.sparsity = sparsity; r.kernel = "SpMV";
 
@@ -311,7 +316,6 @@ static Result run_spmv(int N, double sparsity,
         CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buf_sz));
     if (buf_sz) CUDA_CHECK(cudaMalloc(&buf, buf_sz));
 
-    //Warming
     for (int w = 0; w < WARMUP_RUNS; w++)
         CUSPARSE_CHECK(cusparseSpMV(sp,
             CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -319,11 +323,21 @@ static Result run_spmv(int N, double sparsity,
             CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buf));
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    int inner_reps = (N < 100000) ? 1000 : 50;
+    auto ta = std::chrono::steady_clock::now();
+    CUSPARSE_CHECK(cusparseSpMV(sp, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecX, &beta, vecY, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buf));
+    CUDA_CHECK(cudaDeviceSynchronize()); // Crucial en GPU
+    auto tb = std::chrono::steady_clock::now();
+    
+    double t1rep = std::chrono::duration<double>(tb - ta).count();
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 10)   inner_reps = 10;
+    if (inner_reps > 2000) inner_reps = 2000;
+
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
 
     for (int i = 0; i < BENCH_RUNS; i++) {
-        CUDA_CHECK(cudaDeviceSynchronize());
-
+        
         NvmlCtx ctx;
         pthread_t tid = nvml_start(&ctx, nvml);
         auto t_start = std::chrono::steady_clock::now();
@@ -333,6 +347,7 @@ static Result run_spmv(int N, double sparsity,
         }
         
         CUDA_CHECK(cudaDeviceSynchronize());
+        
         auto t_end = std::chrono::steady_clock::now();
         energies[i] = nvml_stop(&ctx, tid) / inner_reps;
         times[i] = std::chrono::duration<double>(t_end - t_start).count() / inner_reps;
@@ -378,27 +393,36 @@ static Result run_fft(int N, nvmlDevice_t nvml)
     cufftHandle plan;
     CUFFT_CHECK(cufftPlan1d(&plan, N, CUFFT_D2Z, 1));
 
-    std::vector<double> times(BENCH_RUNS);
-    std::vector<double> energies(BENCH_RUNS);
-
-    int inner_reps = (N < 1048576) ? 500 : 50;
-
     for (int w = 0; w < WARMUP_RUNS; w++)
         CUFFT_CHECK(cufftExecD2Z(plan, d_in, d_out));
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    for (int i = 0; i < BENCH_RUNS; i++) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+    auto ta = std::chrono::steady_clock::now();
+    CUFFT_CHECK(cufftExecD2Z(plan, d_in, d_out));
+    CUDA_CHECK(cudaDeviceSynchronize()); // Crucial en GPU
+    auto tb = std::chrono::steady_clock::now();
+    
+    double t1rep = std::chrono::duration<double>(tb - ta).count();
+    int inner_reps = (int)(0.2 / t1rep);
+    if (inner_reps < 5)    inner_reps = 5;
+    if (inner_reps > 5000) inner_reps = 5000;
 
+    std::vector<double> times(BENCH_RUNS);
+    std::vector<double> energies(BENCH_RUNS);
+
+    for (int i = 0; i < BENCH_RUNS; i++) {
+        
         NvmlCtx ctx;
         pthread_t tid = nvml_start(&ctx, nvml);
 
         auto t_start = std::chrono::steady_clock::now();
 
+        // Ráfaga asíncrona a la GPU
         for (int ir = 0; ir < inner_reps; ir++) {
             CUFFT_CHECK(cufftExecD2Z(plan, d_in, d_out));
         }
 
+        // Bloquear CPU hasta que la GPU termine
         CUDA_CHECK(cudaDeviceSynchronize()); 
         auto t_end = std::chrono::steady_clock::now();
         
