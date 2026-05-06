@@ -1,15 +1,3 @@
-/**
- * benchmark_cpu_epyc.cpp
- *
- * Benchmark CPU — AMD EPYC 9554 (Dell PowerEdge R7625)
- * Kernels: GEMM (OpenBLAS), SpMV (Eigen), FFT (FFTW3)
- *
- * Compilación:
- *   g++ -O3 -march=native -std=c++17 benchmark_cpu_epyc.cpp \
- *       -lopenblas -lcsparse -lfftw3 -lfftw3_threads -lpthread -lm \
- *       -o benchmark_cpu_epyc
- */
-
 #include <chrono>
 #include <iostream>
 #include <stdio.h>
@@ -31,7 +19,8 @@ using SpMat = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 using Tripleta = Eigen::Triplet<double>;
 
 static constexpr int BENCH_RUNS = 5;
-static const int    CPU_CORES = 8;
+
+int g_cpu_cores = 16; 
 static const double CPU_FREQ_GHZ = 3.10;
 static const double CPU_CACHE_MB = 384.0;
 
@@ -110,7 +99,7 @@ static void rapl_init(void) {
             int fd = open(path, O_RDONLY);
             if (fd >= 0) {
                 rapl_fds[rapl_n] = fd;
-                rapl_max_uj[rapl_n] = 0; // amd_energy usa 64-bit, raramente hace wrap
+                rapl_max_uj[rapl_n] = 0; 
                 rapl_n++;
             }
         }
@@ -130,7 +119,7 @@ static void rapl_init(void) {
         int fd = open(intel_paths[i], O_RDONLY);
         if (fd >= 0) {
             rapl_fds[rapl_n] = fd;
-            rapl_max_uj[rapl_n] = 262143328850ULL; // Wrap estándar Intel
+            rapl_max_uj[rapl_n] = 262143328850ULL;
             printf("[RAPL] intel-rapl: %s abierto.\n", intel_paths[i]);
             rapl_n++;
             return;
@@ -174,7 +163,6 @@ static void rapl_close(void) {
     for (int i = 0; i < rapl_n; i++) close(rapl_fds[i]);
 }
 
-
 static void csv_header(FILE* f) {
     fprintf(f,
         "Kernel,N,Sparsity,OI,Memoria_MB,"
@@ -189,12 +177,10 @@ static void csv_row(FILE* f, const Result* r) {
         "%d,%.2f\n",
         r->kernel, r->N, r->sparsity, r->op_intensity, r->mem_mb,
         r->time_s, r->energy_j, r->gflops, r->bw_gbps,
-        CPU_CORES, CPU_FREQ_GHZ);
+        g_cpu_cores, CPU_FREQ_GHZ); 
 }
 
-
-
-static Result run_gemm(int N, int nthreads) {
+static Result run_gemm(int N) {
     Result r;
     memset(&r, 0, sizeof(r));
     strncpy(r.kernel, "GEMM", 15);
@@ -331,11 +317,11 @@ static Result run_spmv(int N, double sparsity) {
     r.bw_gbps  = (bytes / 1e9) / r.time_s;
     
     double res = y.sum(); 
-    if (res == -999999) std::cout << " "; // Evitar optimización agresiva del compilador
+    if (res == -999999) std::cout << " "; 
     return r;
 }
 
-static Result run_fft(int N, int nthreads) {
+static Result run_fft(int N) {
     Result r;
     memset(&r, 0, sizeof(r));
     strncpy(r.kernel, "FFT", 15);
@@ -375,9 +361,7 @@ static Result run_fft(int N, int nthreads) {
 
     std::vector<double> times(BENCH_RUNS), energies(BENCH_RUNS);
 
-    // 2. Bucle principal
     for (int i = 0; i < BENCH_RUNS; i++) {
-        // Recargamos datos limpios antes de medir
         memcpy(in, in_orig.data(), N * sizeof(double));
 
         RaplState state0 = rapl_read();
@@ -406,26 +390,25 @@ static Result run_fft(int N, int nthreads) {
 }
 
 int main(int argc, char* argv[]) {
-    const char* out_path = "resultados_epyc.csv";
-    int nthreads = CPU_CORES;
+    const char* out_path = "resultados_epyc_16.csv";
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--output")  && i+1 < argc) out_path  = argv[++i];
-        if (!strcmp(argv[i], "--threads") && i+1 < argc) nthreads  = atoi(argv[++i]);
+        if (!strcmp(argv[i], "--threads") && i+1 < argc) g_cpu_cores  = atoi(argv[++i]);
     }
 
-    openblas_set_num_threads(nthreads);
-    omp_set_num_threads(nthreads);
-    Eigen::setNbThreads(nthreads); 
+    openblas_set_num_threads(g_cpu_cores);
+    omp_set_num_threads(g_cpu_cores);
+    Eigen::setNbThreads(g_cpu_cores); 
 
     fftw_init_threads();
-    fftw_plan_with_nthreads(nthreads);
+    fftw_plan_with_nthreads(g_cpu_cores);
 
     printf("============================================================\n"
            "  Benchmark CPU — AMD EPYC 9554  (Dell PowerEdge R7625)\n"
            "============================================================\n");
-    printf("Hilos OpenBLAS/FFTW : %d\n", nthreads);
-    printf("CPU cores / freq    : %d cores / %.2f GHz\n", CPU_CORES, CPU_FREQ_GHZ);
+    printf("Hilos OpenBLAS/FFTW : %d\n", g_cpu_cores); // Mostrar los hilos reales en pantalla
+    printf("Frecuencia          : %.2f GHz\n", CPU_FREQ_GHZ);
     printf("L3 cache            : %.0f MB\n", CPU_CACHE_MB);
     printf("Resultados          : %s\n\n", out_path);
 
@@ -444,7 +427,7 @@ int main(int argc, char* argv[]) {
         if (3ULL * N * N * sizeof(double) > 350ULL << 30) {
             printf("N=%-6d  SKIP (RAM)\n", N); continue;
         }
-        Result r = run_gemm(N, nthreads);
+        Result r = run_gemm(N);
         printf("%-6d  %-12.6f  %-12.6f  %-10.2f  %-10.4f  %-10.4f\n",
                N, r.time_s, r.energy_j, r.gflops, r.bw_gbps, r.op_intensity);
         csv_row(fp, &r); fflush(fp);
@@ -464,19 +447,19 @@ int main(int argc, char* argv[]) {
             if (need > 350ULL << 30) {
                 printf("N=%-6d sp=%.5f  SKIP (RAM)\n", N, sp); continue;
             }
-            Result r = run_spmv(N, sp);
+            Result r = run_spmv(N, sp); 
             printf("%-6d  %-8.5f  %-12ld  %-12.6f  %-12.6f  %-10.4f\n",
                    N, sp, r.nnz, r.time_s, r.energy_j, r.gflops);
             csv_row(fp, &r); fflush(fp);
         }
     }
 
-    printf("\n=== FFT (FFTW3 r2c double, %d hilos) ===\n", nthreads);
+    printf("\n=== FFT (FFTW3 r2c double) ===\n");
     printf("%-10s  %-12s  %-12s  %-10s  %-10s\n",
            "N", "T_cpu(s)", "Energy(J)", "GFLOPS", "BW(GB/s)");
 
     for (int i = 0; i < N_FFT; i++) {
-        Result r = run_fft(FFT_N[i], nthreads);
+        Result r = run_fft(FFT_N[i]); 
         printf("%-10d  %-12.6f  %-12.6f  %-10.4f  %-10.4f\n",
                r.N, r.time_s, r.energy_j, r.gflops, r.bw_gbps);
         csv_row(fp, &r); fflush(fp);
