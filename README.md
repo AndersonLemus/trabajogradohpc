@@ -65,6 +65,18 @@ g++ -O3 -march=native -std=c++17 src/benchmark_cpu_intel.cpp -I${MKLROOT}/includ
 nvcc -O3 -arch=sm_52 -std=c++11  src/benchmark_gpu_nvidia.cu -L/usr/lib64 -lnvidia-ml -lcublas -lcusparse -lcufft -lpthread -o bin/benchmark_titanx_2
 ```
 
+Pacca corregido no tocar por ahora
+```g++ -O3 -march=native -std=c++17 \
+    src/benchmark_cpu_intel.cpp \
+    -I${MKLROOT}/include \
+    -L${MKLROOT}/lib/intel64 \
+    -lmkl_intel_lp64 \
+    -lmkl_gnu_thread \
+    -lmkl_core \
+    -fopenmp \
+    -lpthread -lm -ldl \
+    -o bin/cpu_intel_01_pacca_pb3
+```
 
 ## Uso de ILP
 ```
