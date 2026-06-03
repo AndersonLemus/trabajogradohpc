@@ -62,9 +62,9 @@ g++ -O3 -march=znver4 -fopenmp -std=c++17 \
 src/benchmark_cpu_amd.cpp \
 -I/home/jsgalvisb/proyecto/libs/openblas-install/include \
 -I/home/jsgalvisb/proyecto/libs/eigen-3.4.0 \
--I/home/jsgalvisb/proyecto/libs/fftw3_install/include \
+-I/home/jsgalvisb/proyecto/libs/fftw-install/include \
 -L/home/jsgalvisb/proyecto/libs/openblas-install/lib \
--L/home/jsgalvisb/proyecto/libs/fftw3_install/lib \
+-L/home/jsgalvisb/proyecto/libs/fftw-install/lib \
 -lopenblas \
 -lfftw3_threads \
 -lfftw3 \
