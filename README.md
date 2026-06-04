@@ -66,7 +66,7 @@ src/benchmark_cpu_amd.cpp \
 -L/home/jsgalvisb/proyecto/libs/openblas-install/lib \
 -L/home/jsgalvisb/proyecto/libs/fftw-install/lib \
 -lopenblas \
--lfftw3_threads \
+-lfftw3_omp \
 -lfftw3 \
 -lm \
 -lpthread \
