@@ -25,10 +25,6 @@ La propuesta es un flujo **ILP + ML** en dos tiempos:
    aprenden esa política y se embeben en un *runtime* C++ que decide en
    microsegundos, sin resolver el ILP en tiempo de ejecución.
 
-**Resultados principales:** los clasificadores reproducen la política del ILP
-con **94,87 % de exactitud**; el modelo XGBoost embebido en el *runtime* C++
-decide con una latencia media de **2,08 µs** (< 0,01 % del tiempo de las cargas
-que el planificador envía a GPU).
 
 ---
 
