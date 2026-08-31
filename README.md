@@ -245,17 +245,9 @@ ejemplo.
 Dataset final: **1 364 instancias**; el ILP asigna 1 206 a CPU (88,4 %) y
 158 a GPU (11,6 %). Detalles y análisis completo en el documento de tesis.
 
----
 
-## 7. Recursos complementarios
 
-- **Repositorio:** <https://github.com/AndersonLemus/trabajogradohpc>
-- **Notebook Colab:** <https://colab.research.google.com/drive/14bjIRm0TNDywzpddDNzft9y4cKC842_g?usp=sharing>
-- **Documento de tesis:** `overleaf/` (fuente LaTeX y PDF compilado)
-
----
-
-## 8. Licencia
+## 7. Licencia
 
 Uso académico. Consultar con los autores antes de reutilizar el código o los
 datos.
